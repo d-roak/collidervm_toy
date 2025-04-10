@@ -98,7 +98,7 @@ graph TD
         end
         D_Set --> Flow for d1
         D_Set --> Flow for d2
-        D_Set --> Flow_for_d_2L[...]
+        %% Removed the problematic line: D_Set --> Flow_for_d_2L[...]
 
         Signer -->|"Generate 2^L Flows"| D_Set
     end
