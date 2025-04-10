@@ -1,73 +1,23 @@
 #![feature(proc_macro_hygiene)] // If using bitcoin_script macro
 
 use bitcoin::{
-    PublicKey, Script, TapLeafHash, Transaction, TxOut,
+    PublicKey, Transaction,
     blockdata::opcodes::all::*,
     blockdata::script::{Instruction, ScriptBuf},
-    hashes::Hash,
     locktime::absolute::LockTime,
-    taproot::{LeafVersion, TAPROOT_ANNEX_PREFIX},
     transaction::Version,
 };
 use bitcoin_scriptexec::{Exec, ExecCtx, Options, TxTemplate};
 use bitvm::hash::blake3::blake3_compute_script_with_limb;
-use bitvm::treepp::{execute_script, script};
+use bitvm::treepp::script;
 use bitvm::u32::u32_std::u32_drop;
 use bitvm::u32::u32_xor::{u8_drop_xor_table, u8_push_xor_table};
 
 use bitvm::{ExecuteInfo, FmtStack};
-use hex;
 use std::error::Error;
 
 // Import for Rust Blake3
 use blake3::Hasher;
-
-use bitcoin::{Opcode, opcodes::all::*};
-// --- Helper function from bitcoin_scriptexec source ---
-// Adapted slightly to avoid dependency on internal Error type
-fn convert_scriptbuf_to_witness(
-    script: ScriptBuf,
-) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
-    // We need a static reference for instructions_minimal, boxing achieves this.
-    // This is a bit of a workaround due to lifetime constraints.
-    let script_ref = Box::leak(script.into_boxed_script()) as &'static bitcoin::Script;
-    let instructions = script_ref.instructions_minimal();
-    let mut stack = vec![];
-
-    for instruction in instructions {
-        let instruction =
-            instruction.map_err(|e| format!("Invalid script instruction: {:?}", e))?;
-
-        match instruction {
-            Instruction::PushBytes(p) => {
-                stack.push(p.as_bytes().to_vec());
-            }
-            Instruction::Op(op) => {
-                match op {
-                    // Push value
-                    OP_PUSHNUM_NEG1 => {
-                        stack.push(vec![0x81]);
-                    }
-                    OP_PUSHNUM_1 | OP_PUSHNUM_2 | OP_PUSHNUM_3 | OP_PUSHNUM_4 | OP_PUSHNUM_5
-                    | OP_PUSHNUM_6 | OP_PUSHNUM_7 | OP_PUSHNUM_8 | OP_PUSHNUM_9 | OP_PUSHNUM_10
-                    | OP_PUSHNUM_11 | OP_PUSHNUM_12 | OP_PUSHNUM_13 | OP_PUSHNUM_14
-                    | OP_PUSHNUM_15 | OP_PUSHNUM_16 => {
-                        let n = op.to_u8() - (OP_PUSHNUM_1.to_u8() - 1);
-                        stack.push(vec![n]);
-                    }
-                    // Any other opcode is invalid in a scriptSig used as witness
-                    _ => return Err(format!("scriptSig contains invalid opcode: {:?}", op).into()),
-                }
-            }
-        }
-    }
-    // Clean up the leaked script reference (important!)
-    unsafe {
-        let _ = Box::from_raw(script_ref as *const bitcoin::Script as *mut bitcoin::Script);
-    }
-    Ok(stack)
-}
-// --- End Helper ---
 
 // --- Configuration ---
 #[derive(Debug, Clone)]
@@ -126,16 +76,6 @@ fn collider_hash(x_bytes: &[u8]) -> u32 {
             0 // Return default on error
         }
     }
-}
-
-/// Generates Bitcoin Script for the simple hash: H(x) = x + CONSTANT
-/// Assumes x (4 bytes LE) is on top of the stack. Leaves H(x) (4 bytes LE) on stack.
-fn script_collider_hash() -> ScriptBuf {
-    script! {
-        <SIMPLE_HASH_CONSTANT>
-        OP_ADD
-    }
-    .compile()
 }
 
 // --- Hash Functions ---
@@ -417,8 +357,10 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     let witness_1 = convert_scriptbuf_to_witness(script_sig_1)?;
     let witness_2 = convert_scriptbuf_to_witness(script_sig_2)?;
 
-    let mut exec_options = Options::default();
-    exec_options.require_minimal = false;
+    let exec_options = Options {
+        require_minimal: false,
+        ..Default::default()
+    };
 
     println!("\nExecuting Tx1 ...");
     let exec_result_1 = execute_script_with_witness_custom_opts(
@@ -528,3 +470,49 @@ fn main() {
         eprintln!("Simulation Error: {}", e);
     }
 }
+
+// --- Helper function from bitcoin_scriptexec source ---
+// Adapted slightly to avoid dependency on internal Error type
+fn convert_scriptbuf_to_witness(
+    script: ScriptBuf,
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    // We need a static reference for instructions_minimal, boxing achieves this.
+    // This is a bit of a workaround due to lifetime constraints.
+    let script_ref = Box::leak(script.into_boxed_script()) as &'static bitcoin::Script;
+    let instructions = script_ref.instructions_minimal();
+    let mut stack = vec![];
+
+    for instruction in instructions {
+        let instruction =
+            instruction.map_err(|e| format!("Invalid script instruction: {:?}", e))?;
+
+        match instruction {
+            Instruction::PushBytes(p) => {
+                stack.push(p.as_bytes().to_vec());
+            }
+            Instruction::Op(op) => {
+                match op {
+                    // Push value
+                    OP_PUSHNUM_NEG1 => {
+                        stack.push(vec![0x81]);
+                    }
+                    OP_PUSHNUM_1 | OP_PUSHNUM_2 | OP_PUSHNUM_3 | OP_PUSHNUM_4 | OP_PUSHNUM_5
+                    | OP_PUSHNUM_6 | OP_PUSHNUM_7 | OP_PUSHNUM_8 | OP_PUSHNUM_9 | OP_PUSHNUM_10
+                    | OP_PUSHNUM_11 | OP_PUSHNUM_12 | OP_PUSHNUM_13 | OP_PUSHNUM_14
+                    | OP_PUSHNUM_15 | OP_PUSHNUM_16 => {
+                        let n = op.to_u8() - (OP_PUSHNUM_1.to_u8() - 1);
+                        stack.push(vec![n]);
+                    }
+                    // Any other opcode is invalid in a scriptSig used as witness
+                    _ => return Err(format!("scriptSig contains invalid opcode: {:?}", op).into()),
+                }
+            }
+        }
+    }
+    // Clean up the leaked script reference (important!)
+    unsafe {
+        let _ = Box::from_raw(script_ref as *const bitcoin::Script as *mut bitcoin::Script);
+    }
+    Ok(stack)
+}
+// --- End Helper ---
