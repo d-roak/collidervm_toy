@@ -46,36 +46,6 @@ pub struct SignerInfo {
 // Example: f(x) is true if x (as u32 LE) is > 100 AND < 200
 const F1_THRESHOLD: u32 = 100;
 const F2_THRESHOLD: u32 = 200;
-const SIMPLE_HASH_CONSTANT: u32 = 12345; // Constant for our simple hash
-
-// --- Simple Custom Hash (MVP) ---
-
-/// Rust implementation of the simple hash: H(x) = x + CONSTANT
-/// x is treated as a u32 Little Endian.
-fn collider_hash(x_bytes: &[u8]) -> u32 {
-    if x_bytes.len() != 4 {
-        eprintln!(
-            "ERROR: collider_hash expects 4 bytes, got {}",
-            x_bytes.len()
-        );
-        return 0; // Return a default value or handle error
-    }
-    // Correct way to convert slice to fixed array
-    let array: Result<[u8; 4], _> = x_bytes.try_into();
-    match array {
-        Ok(arr) => {
-            let x_val = u32::from_le_bytes(arr);
-            x_val.wrapping_add(SIMPLE_HASH_CONSTANT)
-        }
-        Err(_) => {
-            eprintln!(
-                "ERROR: Failed to convert slice to [u8; 4] in collider_hash. Len: {}",
-                x_bytes.len()
-            );
-            0 // Return default on error
-        }
-    }
-}
 
 // --- Hash Functions ---
 
@@ -122,29 +92,6 @@ fn script_collider_hash_blake3() -> ScriptBuf {
 
         // Clean up the Blake3 lookup table
         { u8_drop_xor_table() }
-    }
-    .compile()
-}
-
-// Produces a script that implements a debug version of Blake3 hash verification
-fn script_collider_hash_blake3_debug() -> ScriptBuf {
-    // This is the debug version that just checks for a hardcoded hash value
-    // For now, this just verifies the input matches the expected hash
-    // Expected hash for x=114 is 0x7D9FAAB7 (2107615927u32)
-    script! {
-        // At this point, we have the provided hash on the stack
-
-        // Compare with expected hash
-        <2107615927u32>
-        OP_EQUAL
-
-        // This will ensure we have a proper 0x01 or 0x00 for the result
-        // for tapscript compatibility
-        OP_IF
-            OP_1
-        OP_ELSE
-            OP_0
-        OP_ENDIF
     }
     .compile()
 }
@@ -230,7 +177,7 @@ fn find_b_pair_simplified_exact(
 
 // --- Main Simulation ---
 fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
-    println!("--- ColliderVM MVP Simulation ---");
+    println!("--- ColliderVM MVP Simulation with Real Blake3 ---");
 
     // 1. Configuration
     let config = ColliderVmConfig { l: 4, b: 8, k: 2 }; // B=8 bits
@@ -246,219 +193,163 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     let expected_x = 114u32;
     let x_bytes = expected_x.to_le_bytes().to_vec();
 
-    // Convert to integer for debugging display
-    let x_as_int = u32::from_le_bytes([x_bytes[0], x_bytes[1], x_bytes[2], x_bytes[3]]);
-
     // Calculate Blake3 hash for verification
     let blake3_hash = collider_hash_blake3(&x_bytes);
     println!(
-        "Input x={} (0x{:X}) has Blake3 hash: {} (0x{:X})",
-        x_as_int, x_as_int, blake3_hash, blake3_hash
+        "Input x={} has Blake3 hash: {} (0x{:X})",
+        expected_x, blake3_hash, blake3_hash
     );
 
-    // 4. Create verification scripts for F1 and F2
-    let f1_script: ScriptBuf = script! {
-        <100u32> // F1_THRESHOLD
-        OP_GREATERTHAN
-    }
-    .compile();
+    // 4. Create verification scripts using actual f1 and f2 functions
+    let f1_script = script_f1();
+    let f2_script = script_f2();
 
-    let _f2_script: ScriptBuf = script! {
-        <200u32> // F2_THRESHOLD
-        OP_LESSTHAN
-    }
-    .compile();
+    // 5. Get the real Blake3 script
+    let blake3_script = script_collider_hash_blake3();
 
-    // 5. Create scripts for verification
+    // 6. Create integrated scripts that:
+    //    a) Calculate Blake3 hash from input x
+    //    b) Verify hash against expected value
+    //    c) Verify sub-function (f1 or f2)
 
-    // A) Direct equality check scripts (original approach)
-    let script_1: ScriptBuf = script! {
-        // Duplicate x for equality check and F1
+    // For script 1 (F1)
+    let blake3_script_bytes = blake3_script.as_script().as_bytes().to_vec();
+    let f1_script_bytes = f1_script.as_script().as_bytes().to_vec();
+
+    let script_1 = script! {
+        // Duplicate input for both hash calculation and function execution
         OP_DUP
 
-        // Check that x equals 114
-        <x_bytes.clone()>
+        // Calculate Blake3 hash
+        { blake3_script_bytes.clone() }
+
+        // Compare with expected hash
+        <blake3_hash>
         OP_EQUALVERIFY
 
-        // Execute F1(x) - x > 100
-        <100u32>
-        OP_GREATERTHAN
+        // Execute F1(x) on the original input
+        { f1_script_bytes }
 
-        // Return true if all checks pass
+        // Return true if all checks pass (already verified by OP_VERIFY in f1_script)
         OP_IF
-            OP_TRUE
+            OP_1
         OP_ELSE
-            OP_FALSE
+            OP_0
         OP_ENDIF
     }
     .compile();
 
-    // Script 2: Verify x=114 and F2(x)
-    let script_2: ScriptBuf = script! {
-        // Duplicate x for equality check and F2
+    // For script 2 (F2)
+    let f2_script_bytes = f2_script.as_script().as_bytes().to_vec();
+
+    let script_2 = script! {
+        // Duplicate input for both hash calculation and function execution
         OP_DUP
 
-        // Check that x equals 114
-        <x_bytes.clone()>
+        // Calculate Blake3 hash
+        { blake3_script_bytes.clone() }
+
+        // Compare with expected hash
+        <blake3_hash>
         OP_EQUALVERIFY
 
-        // Execute F2(x) - x < 200
-        <200u32>
-        OP_LESSTHAN
+        // Execute F2(x) on the original input
+        { f2_script_bytes }
 
-        // Return true if all checks pass
+        // Return true if all checks pass (already verified by OP_VERIFY in f2_script)
         OP_IF
-            OP_TRUE
+            OP_1
         OP_ELSE
-            OP_FALSE
+            OP_0
         OP_ENDIF
     }
     .compile();
 
-    // B) Blake3 verification approaches
+    // Create separate scripts for testing Blake3 hash computation alone
+    let blake3_only_script = script! {
+        // Duplicate input for debugging
+        OP_DUP
 
-    // Create a blake3 direct script (takes the hash directly as input)
-    let blake3_script_1 = script_blake3_direct(blake3_hash, &f1_script);
-    let blake3_script_2 = script_blake3_direct_f2(blake3_hash);
+        // Calculate Blake3 hash
+        { blake3_script_bytes }
 
-    // Debug Blake3 hash script that verifies the hash directly
-    let blake3_debug = script_collider_hash_blake3_debug();
+        // Compare with expected hash
+        <blake3_hash>
+        OP_EQUAL
+    }
+    .compile();
 
-    // Full verification scripts
-    println!("\n=== SCRIPTS TO EXECUTE ===");
-    println!(
-        "\nDirect equality Script 1 (x=114 AND F1): {}",
-        script_1.to_asm_string()
-    );
-    println!(
-        "\nDirect Blake3 Script 1 (Blake3 hash AND F1): {}",
-        blake3_script_1.to_asm_string()
-    );
-    println!(
-        "\nDirect Blake3 Script 2 (Blake3 hash AND F2): {}",
-        blake3_script_2.to_asm_string()
-    );
-    println!("\nBlake3 Debug Script: {}", blake3_debug.to_asm_string());
+    // Print the scripts
+    println!("\n--- Scripts ---");
+    println!("Blake3 Hash Script: {}", blake3_script.to_asm_string());
+    println!("Script 1 (Blake3 + F1): {}", script_1.to_asm_string());
+    println!("Script 2 (Blake3 + F2): {}", script_2.to_asm_string());
+    println!("Blake3 Only Script: {}", blake3_only_script.to_asm_string());
 
-    // 6. Create witness
-    // For direct equality tests: witness is simply x=114 as 32-bit LE integer
-    // For Blake3 direct: witness needs to be the Blake3 hash (2107615927)
-
-    // Direct equality witness (x=114)
-    let witness_script_direct = script! {
+    // Create witness with just the input x
+    let witness_script = script! {
         <x_bytes>
     }
     .compile();
 
-    // Blake3 hash witness
-    let witness_script_blake3 = script! {
-        <blake3_hash>
-    }
-    .compile();
-
-    println!(
-        "\nWitness Script (Direct): {}",
-        witness_script_direct.to_asm_string()
-    );
-    println!(
-        "Witness Script (Blake3 Hash): {}",
-        witness_script_blake3.to_asm_string()
-    );
+    println!("\nWitness Script: {}", witness_script.to_asm_string());
 
     // Convert to witness format
-    let witness_direct = convert_scriptbuf_to_witness(witness_script_direct)?;
-    let witness_blake3 = convert_scriptbuf_to_witness(witness_script_blake3)?;
+    let witness = convert_scriptbuf_to_witness(witness_script)?;
 
-    // 7. Execute the scripts
+    // Execute the scripts
     let exec_options = Options {
         require_minimal: false,
         ..Default::default()
     };
 
-    println!("\n=== EXECUTION RESULTS ===");
+    println!("\n--- Execution Results ---");
 
-    // Direct Blake3 approach with hash directly
-    println!("\nExecuting Direct Blake3 Script 1 with Blake3 Hash Witness...");
-    let result_blake3_1 = execute_script_with_witness_custom_opts(
-        blake3_script_1,
-        witness_blake3.clone(),
+    // Try the Blake3 hash computation only first
+    println!("\nExecuting Blake3 Hash Computation...");
+    let exec_result_blake3 = execute_script_with_witness_custom_opts(
+        blake3_only_script,
+        witness.clone(),
         exec_options.clone(),
     );
 
-    if result_blake3_1.success {
-        println!("Direct Blake3 Script 1 execution succeeded!");
-        println!("Result: {}", result_blake3_1);
+    if exec_result_blake3.success {
+        println!("Blake3 Hash Computation Succeeded!");
+        println!("Result: {}", exec_result_blake3);
     } else {
-        println!("Direct Blake3 Script 1 execution FAILED!");
-        println!("Error details: {}", result_blake3_1);
-        // Continue with other scripts
+        println!("Blake3 Hash Computation FAILED!");
+        println!("Error details: {}", exec_result_blake3);
+        // Continue with other tests even if this fails
     }
 
-    // Second direct Blake3 test
-    println!("\nExecuting Direct Blake3 Script 2 with Blake3 Hash Witness...");
-    let result_blake3_2 = execute_script_with_witness_custom_opts(
-        blake3_script_2,
-        witness_blake3.clone(),
-        exec_options.clone(),
-    );
-
-    if result_blake3_2.success {
-        println!("Direct Blake3 Script 2 execution succeeded!");
-        println!("Result: {}", result_blake3_2);
-    } else {
-        println!("Direct Blake3 Script 2 execution FAILED!");
-        println!("Error details: {}", result_blake3_2);
-        // Continue with other scripts
-    }
-
-    // Try just the Blake3 debug script
-    println!("\nExecuting Blake3 Debug Script with Blake3 Hash Witness...");
-    let result_blake3_debug = execute_script_with_witness_custom_opts(
-        blake3_debug,
-        witness_blake3.clone(),
-        exec_options.clone(),
-    );
-
-    if result_blake3_debug.success {
-        println!("Blake3 Debug Script execution succeeded!");
-        println!("Result: {}", result_blake3_debug);
-    } else {
-        println!("Blake3 Debug Script execution FAILED!");
-        println!("Error details: {}", result_blake3_debug);
-        // Continue with other scripts
-    }
-
-    // Run the original direct equality scripts
-    println!("\nExecuting Direct Equality Script 1 (x=114 AND F1)...");
-    let exec_result_1 = execute_script_with_witness_custom_opts(
-        script_1,
-        witness_direct.clone(),
-        exec_options.clone(),
-    );
+    // Try script 1 (F1)
+    println!("\nExecuting Script 1 (Blake3 + F1)...");
+    let exec_result_1 =
+        execute_script_with_witness_custom_opts(script_1, witness.clone(), exec_options.clone());
 
     if exec_result_1.success {
-        println!("Direct Equality Script 1 execution succeeded!");
+        println!("Script 1 Execution Succeeded!");
         println!("Result: {}", exec_result_1);
     } else {
-        println!("Direct Equality Script 1 execution FAILED!");
+        println!("Script 1 Execution FAILED!");
         println!("Error details: {}", exec_result_1);
-        return Err("Direct Equality Script 1 execution failed!".into());
+        // Continue with script 2 even if this fails
     }
 
-    println!("\nExecuting Direct Equality Script 2 (x=114 AND F2)...");
-    let exec_result_2 =
-        execute_script_with_witness_custom_opts(script_2, witness_direct, exec_options);
+    // Try script 2 (F2)
+    println!("\nExecuting Script 2 (Blake3 + F2)...");
+    let exec_result_2 = execute_script_with_witness_custom_opts(script_2, witness, exec_options);
 
     if exec_result_2.success {
-        println!("Direct Equality Script 2 execution succeeded!");
+        println!("Script 2 Execution Succeeded!");
         println!("Result: {}", exec_result_2);
     } else {
-        println!("Direct Equality Script 2 execution FAILED!");
+        println!("Script 2 Execution FAILED!");
         println!("Error details: {}", exec_result_2);
-        return Err("Direct Equality Script 2 execution failed!".into());
     }
 
-    println!("\n--- MVP Simulation Complete ---");
+    println!("\n--- Simulation Complete ---");
+    println!("Note: Failures are expected for now, the MVP is still now working properly.");
 
     Ok(())
 }
@@ -479,97 +370,6 @@ fn script_f2() -> ScriptBuf {
         <F2_THRESHOLD>
         OP_LESSTHAN
         OP_VERIFY
-    }
-    .compile()
-}
-
-/// Generates a script that verifies the Blake3 hash of the input and executes a sub-function
-fn generate_blake3_verification_script(target_hash: u32, sub_function: &ScriptBuf) -> ScriptBuf {
-    // Convert target hash to bytes and then to nibbles
-    let target_bytes = target_hash.to_le_bytes();
-    let target_nibbles = vec![
-        target_bytes[0] & 0x0F,
-        target_bytes[0] >> 4,
-        target_bytes[1] & 0x0F,
-        target_bytes[1] >> 4,
-        target_bytes[2] & 0x0F,
-        target_bytes[2] >> 4,
-        target_bytes[3] & 0x0F,
-        target_bytes[3] >> 4,
-    ];
-
-    // Get the sub-function script bytes
-    let sub_function_bytes = sub_function.as_script().as_bytes().to_vec();
-
-    // Get the Blake3 script bytes
-    let blake3_script_bytes = script_collider_hash_blake3()
-        .as_script()
-        .as_bytes()
-        .to_vec();
-
-    // Create the Blake3 verification script
-    script! {
-        // Duplicate the input for both hash verification and sub-function
-        OP_DUP
-
-        // Get Blake3 hash of input - using script bytes instead of direct call
-        { blake3_script_bytes }
-
-        // Verify hash against target nibbles
-        <target_nibbles[7]> // Most significant nibble first
-        OP_EQUALVERIFY
-        <target_nibbles[6]>
-        OP_EQUALVERIFY
-        <target_nibbles[5]>
-        OP_EQUALVERIFY
-        <target_nibbles[4]>
-        OP_EQUALVERIFY
-        <target_nibbles[3]>
-        OP_EQUALVERIFY
-        <target_nibbles[2]>
-        OP_EQUALVERIFY
-        <target_nibbles[1]>
-        OP_EQUALVERIFY
-        <target_nibbles[0]> // Least significant nibble last
-        OP_EQUALVERIFY
-
-        // Run the sub-function on original input
-        { sub_function_bytes }
-
-        // Return true if all checks pass
-        OP_IF
-            OP_TRUE
-        OP_ELSE
-            OP_FALSE
-        OP_ENDIF
-    }
-    .compile()
-}
-
-/// Generates a simplified script that directly verifies against the expected Blake3 hash.
-/// This is a WIP version that we'll improve in future commits.
-fn generate_simplified_blake3_script(expected_hash: u32, sub_function: &ScriptBuf) -> ScriptBuf {
-    // Get the sub-function script bytes
-    let sub_function_bytes = sub_function.as_script().as_bytes().to_vec();
-
-    // Simply calculate Blake3 hash of input and return it on the stack for comparison
-    script! {
-        // Duplicate x for both operations
-        OP_DUP
-
-        // Calculate Blake3 hash directly in Rust (simple hash verification for WIP)
-        <expected_hash>
-        OP_EQUALVERIFY
-
-        // Execute subfunction (F1 or F2)
-        { sub_function_bytes }
-
-        // Return success/failure
-        OP_IF
-            OP_TRUE
-        OP_ELSE
-            OP_FALSE
-        OP_ENDIF
     }
     .compile()
 }
@@ -1046,59 +846,4 @@ mod tests {
         println!("2. Use this generate_blake3_verification_script function");
         println!("3. Test with the same input (x=114) and verify execution");
     }
-}
-
-/// Create a script that expects the Blake3 hash as input and verifies a condition
-fn script_blake3_direct(expected_hash: u32, _condition_script: &ScriptBuf) -> ScriptBuf {
-    script! {
-        // At this point, we have the provided hash on the stack
-
-        // Compare with expected hash
-        <expected_hash>
-        OP_EQUALVERIFY
-
-        // For demonstration, we want a value (x) that produces this hash (114)
-        <114u32>
-
-        // Now we run the condition directly, instead of embedding it
-        // Use basic operations to avoid bytecode embedding issues
-
-        // For F1: Check if x > 100
-        <100u32>
-        OP_GREATERTHAN
-
-        // The result should be a minimal TRUE/FALSE for tapscript
-        OP_IF
-            OP_1
-        OP_ELSE
-            OP_0
-        OP_ENDIF
-    }
-    .compile()
-}
-
-/// Create a script that expects the Blake3 hash as input and verifies it meets condition F2
-fn script_blake3_direct_f2(expected_hash: u32) -> ScriptBuf {
-    script! {
-        // At this point, we have the provided hash on the stack
-
-        // Compare with expected hash
-        <expected_hash>
-        OP_EQUALVERIFY
-
-        // For demonstration, we want a value that produces this hash (114)
-        <114u32>
-
-        // Check if x < 200 (F2 condition)
-        <200u32>
-        OP_LESSTHAN
-
-        // The result should be a minimal TRUE/FALSE for tapscript
-        OP_IF
-            OP_1
-        OP_ELSE
-            OP_0
-        OP_ENDIF
-    }
-    .compile()
 }
