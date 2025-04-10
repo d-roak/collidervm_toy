@@ -129,9 +129,9 @@ fn script_collider_hash() -> ScriptBuf {
 /// Generates the scriptPubKey for a ColliderVM transaction (MVP simplified).
 /// Checks: 1. Signer Sig, 2. Hash Puzzle (H(x) == target_hash_value), 3. Subfunction Fi
 fn generate_script_pubkey(
-    _config: &ColliderVmConfig, // Config not strictly needed for exact hash match puzzle
+    // _config: &ColliderVmConfig, // Removed unused parameter
     signer_pubkey: &PublicKey,
-    target_hash_value: u32, // Target value for the exact hash puzzle
+    target_hash_value: u32,
     sub_function_script: &ScriptBuf,
 ) -> ScriptBuf {
     // Witness stack expected by this script: [signer_sig, r, x] (x at top initially)
@@ -175,7 +175,7 @@ fn generate_script_pubkey(
 /// Simulates the operator finding a valid x for a target d_val and config B.
 /// Uses the MVP puzzle H(x) == target_hash_val. 'r' is not used.
 fn find_b_pair_simplified_exact(
-    _config: &ColliderVmConfig, // Config not needed for exact hash match
+    // _config: &ColliderVmConfig, // Removed unused parameter
     target_hash_val: u32,
     candidate_x: &InputX,
 ) -> Option<NonceR> {
@@ -196,7 +196,6 @@ fn find_b_pair_simplified_exact(
 
     if hash_result == target_hash_val {
         println!("  -> Match found for target H(x) = {}", target_hash_val);
-        // Return a dummy nonce as 'r' isn't used in the hash check
         Some(vec![0u8; 8])
     } else {
         println!("  -> No match for target H(x) = {}", target_hash_val);
@@ -301,11 +300,17 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     let f1_script = script_f1();
     let f2_script = script_f2();
 
-    // Pass the full target_hash_value to the script generation
-    let script_pubkey_1 =
-        generate_script_pubkey(&config, &signer_info.pubkey, target_hash_value, &f1_script);
-    let script_pubkey_2 =
-        generate_script_pubkey(&config, &signer_info.pubkey, target_hash_value, &f2_script);
+    // Pass relevant parameters only
+    let script_pubkey_1 = generate_script_pubkey(
+        /*&config,*/ &signer_info.pubkey,
+        target_hash_value,
+        &f1_script,
+    );
+    let script_pubkey_2 = generate_script_pubkey(
+        /*&config,*/ &signer_info.pubkey,
+        target_hash_value,
+        &f2_script,
+    );
 
     // Debug: Print generated scripts
     println!(
@@ -320,8 +325,11 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     println!("{}", script_pubkey_2);
 
     // 6. Operator "Finds" Nonce (using the found x)
-    // This function needs to be updated for the new puzzle H(x) == target
-    let operator_r = match find_b_pair_simplified_exact(&config, target_hash_value, &operator_x) {
+    // Pass relevant parameters only
+    let operator_r = match find_b_pair_simplified_exact(
+        /*&config,*/ target_hash_value,
+        &operator_x,
+    ) {
         Some(r) => {
             println!(
                 "Operator confirmed valid x matches target H(x)={}.",
@@ -364,7 +372,7 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     // Create custom options with minimal checks disabled
     let mut exec_options = Options::default();
     exec_options.require_minimal = false;
-    exec_options.verify_minimal_if = false; // Also disable minimal IF check just in case
+    // exec_options.verify_minimal_if = false; // Keep minimal IF check enabled for now
 
     println!("\nExecuting Tx1 (scriptPubKey_1 + witness_1)...");
     // Use the custom execute function with modified options
@@ -375,7 +383,7 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     );
     if exec_result_1.success {
         println!("Tx1 Succeeded (simulated).");
-        println!("Tx1 Result: {}", exec_result_1); // Display the full result struct
+        println!("Tx1 Result: {}", exec_result_1);
     } else {
         println!("Tx1 FAILED execution!");
         println!("Tx1 Error details: {}", exec_result_1);
@@ -424,14 +432,8 @@ fn script_f2() -> ScriptBuf {
     }
 }
 
-fn main() {
-    if let Err(e) = run_mvp_simulation() {
-        eprintln!("Simulation Error: {}", e);
-    }
-}
-
 // --- Copied/Modified from bitcoin_scriptexec ---
-// We need to modify the options used
+// Re-add the custom executor function
 use bitcoin::locktime::absolute::LockTime;
 use bitcoin::transaction::{Transaction, Version};
 
@@ -449,13 +451,12 @@ fn execute_script_with_witness_custom_opts(
         },
         prevouts: vec![],
         input_idx: 0,
-        // Use the generic Hash trait method for all-zero hash
         taproot_annex_scriptleaf: Some((bitcoin::hashes::Hash::all_zeros(), None)),
     };
 
     let mut exec = Exec::new(
-        ExecCtx::Tapscript, // Assuming Tapscript context
-        options,            // Use provided options
+        ExecCtx::Tapscript,
+        options, // Use provided options
         tx_template,
         script,
         witness,
@@ -479,3 +480,9 @@ fn execute_script_with_witness_custom_opts(
     }
 }
 // --- End Copied/Modified ---
+
+fn main() {
+    if let Err(e) = run_mvp_simulation() {
+        eprintln!("Simulation Error: {}", e);
+    }
+}
