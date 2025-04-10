@@ -1,14 +1,28 @@
 #![feature(proc_macro_hygiene)] // If using bitcoin_script macro
 
-use bitcoin::PublicKey;
-use bitcoin::blockdata::opcodes::all::*;
-use bitcoin::blockdata::script::Instruction;
-use bitcoin::blockdata::script::ScriptBuf;
-use bitcoin_script::script;
-use bitcoin_script_dsl::treepp::*;
-use bitcoin_scriptexec::{Exec, ExecCtx, ExecuteInfo, FmtStack, Options, TxTemplate};
+use bitcoin::{
+    PublicKey, Script, TapLeafHash, Transaction, TxOut,
+    blockdata::opcodes::all::*,
+    blockdata::script::{Instruction, ScriptBuf},
+    hashes::Hash,
+    locktime::absolute::LockTime,
+    taproot::{LeafVersion, TAPROOT_ANNEX_PREFIX},
+    transaction::Version,
+};
+use bitcoin_scriptexec::{Exec, ExecCtx, Options, TxTemplate};
+use bitvm::hash::blake3::blake3_compute_script_with_limb;
+use bitvm::treepp::{execute_script, script};
+use bitvm::u32::u32_std::u32_drop;
+use bitvm::u32::u32_xor::{u8_drop_xor_table, u8_push_xor_table};
+
+use bitvm::{ExecuteInfo, FmtStack};
+use hex;
 use std::error::Error;
 
+// Import for Rust Blake3
+use blake3::Hasher;
+
+use bitcoin::{Opcode, opcodes::all::*};
 // --- Helper function from bitcoin_scriptexec source ---
 // Adapted slightly to avoid dependency on internal Error type
 fn convert_scriptbuf_to_witness(
@@ -118,10 +132,56 @@ fn collider_hash(x_bytes: &[u8]) -> u32 {
 /// Assumes x (4 bytes LE) is on top of the stack. Leaves H(x) (4 bytes LE) on stack.
 fn script_collider_hash() -> ScriptBuf {
     script! {
-        <SIMPLE_HASH_CONSTANT> // Push the constant
-        OP_ADD                 // Add x + CONSTANT (Script handles numbers appropriately)
-                               // Result H(x) is left on stack
+        <SIMPLE_HASH_CONSTANT>
+        OP_ADD
     }
+    .compile()
+}
+
+// --- Hash Functions ---
+
+// Blake3 Hash (New)
+
+/// Rust implementation of the Blake3 hash collider puzzle.
+/// Takes 4-byte x, returns first 4 bytes of Blake3(x) as u32 LE.
+fn collider_hash_blake3(x_bytes: &[u8]) -> u32 {
+    if x_bytes.len() != 4 {
+        eprintln!(
+            "ERROR: collider_hash_blake3 expects 4 bytes, got {}",
+            x_bytes.len()
+        );
+        return 0;
+    }
+    let mut hasher = Hasher::new();
+    hasher.update(x_bytes);
+    let hash_bytes = hasher.finalize();
+    // Extract the first 4 bytes and convert to u32 LE
+    let hash_prefix: [u8; 4] = hash_bytes.as_bytes()[0..4]
+        .try_into()
+        .expect("Blake3 hash is too short");
+    u32::from_le_bytes(hash_prefix)
+}
+
+/// Generates Bitcoin Script for the Blake3 hash puzzle.
+/// Assumes x (4 bytes LE as u32) is on top of the stack.
+/// Leaves the first 4 bytes of Blake3(x) (as u32 LE) on stack.
+fn script_collider_hash_blake3() -> ScriptBuf {
+    script! {
+        // Initialize Blake3 lookup table
+        { u8_push_xor_table() } // Still assuming these exist and are callable
+
+        // Perform Blake3 hash
+        { blake3_compute_script_with_limb(0, 4) }
+
+        // Drop the top 7 chunks
+        for _ in 0..7 {
+            { u32_drop() }
+        }
+
+        // Clean up the Blake3 lookup table
+        { u8_drop_xor_table() }
+    }
+    .compile()
 }
 
 // --- Script Generation ---
@@ -137,37 +197,27 @@ fn generate_script_pubkey(
     // Witness stack expected by this script: [signer_sig, r, x] (x at top initially)
     // MVP Simplification: 'r' is ignored for the hash puzzle.
 
+    let script_collider_hash_blake3_script = script_collider_hash_blake3()
+        .as_script()
+        .as_bytes()
+        .to_vec();
+
+    let sub_function_script_bytes = sub_function_script.as_script().as_bytes().to_vec();
+
     script! {
-        // Stack: [signer_sig, r, x]
-
-        // 1. Verify Hash Puzzle H(x) == target_hash_value
-        // x is at the top, r is below it. We need x for the hash.
-        OP_DUP       // Stack: [signer_sig, r, x, x]
-        // Apply the custom hash function H(x)
-        { script_collider_hash() } // Stack: [signer_sig, r, x, H(x)]
-
-        // Compare H(x) with the target value target_hash_value
-        <target_hash_value> // Stack: [signer_sig, r, x, H(x), target_hash_value]
-        OP_EQUALVERIFY      // Stack: [signer_sig, r, x] - Fails if H(x) != target_hash_value
-
-        // 2. Verify Subfunction Fi(x)
-        // x is on top. Append the subfunction's script logic.
-        { sub_function_script.clone() } // Stack: [signer_sig, r] (assuming subfunction consumes x and leaves nothing)
-
-        // Clean up witness stack
-        OP_DROP      // Stack: [signer_sig] - Drop r (since it wasn't used in the hash)
-
-        // 3. Verify Signer's Signature (Commented out for MVP)
-        <signer_pubkey.to_bytes()> // Stack: [signer_sig, signer_pubkey]
-        // OP_CHECKSIGVERIFY // Fails if signature is invalid -- COMMENTED OUT
-
-        // Clean up stack from bypassed signature check
-        OP_DROP // Drop signer_pubkey, Stack: [signer_sig]
-        OP_DROP // Drop signer_sig, Stack: []
-
-        // Script succeeds if it reaches here without VERIFY failing
-        OP_TRUE // Leave TRUE on stack for success
+        OP_DUP
+        { script_collider_hash_blake3_script }
+        <target_hash_value>
+        OP_EQUALVERIFY
+        { sub_function_script_bytes }
+        OP_DROP
+        <signer_pubkey.to_bytes()>
+        // OP_CHECKSIGVERIFY
+        OP_DROP
+        OP_DROP
+        OP_TRUE
     }
+    .compile()
 }
 
 // --- Simulation Logic ---
@@ -297,19 +347,19 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     );
 
     // 5. Generate Scripts for the chosen flow target_hash_value
-    let f1_script = script_f1();
-    let f2_script = script_f2();
+    let f1_script: ScriptBuf = script_f1(); // Returns ScriptBuf
+    let f2_script: ScriptBuf = script_f2(); // Returns ScriptBuf
 
     // Pass relevant parameters only
-    let script_pubkey_1 = generate_script_pubkey(
+    let script_pubkey_1: ScriptBuf = generate_script_pubkey(
         /*&config,*/ &signer_info.pubkey,
         target_hash_value,
-        &f1_script,
+        &f1_script, // Pass reference
     );
-    let script_pubkey_2 = generate_script_pubkey(
+    let script_pubkey_2: ScriptBuf = generate_script_pubkey(
         /*&config,*/ &signer_info.pubkey,
         target_hash_value,
-        &f2_script,
+        &f2_script, // Pass reference
     );
 
     // Debug: Print generated scripts
@@ -347,14 +397,14 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    // 7. Operator Builds Witnesses (ScriptSigs) - Use dummy signature
-    let dummy_sig = vec![0u8; 71]; // Realistic dummy DER signature size
-    // Witness format: [sig, r, x]
-    let script_sig_1 = script! {
+    // 7. Operator Builds Witnesses (ScriptSigs) - Use bitcoin_script::script!
+    let dummy_sig = vec![0u8; 71];
+    let script_sig_1: ScriptBuf = script! { // Return ScriptBuf
         { dummy_sig.clone() }
         { operator_r.clone() }
         { operator_x.clone() }
-    };
+    }
+    .compile();
     let script_sig_2 = script_sig_1.clone();
 
     println!("\nWitness for Tx1/Tx2 (bottom to top): [sig, r, x]");
@@ -362,22 +412,17 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     println!("  r: {} (dummy nonce)", hex::encode(&operator_r));
     println!("sig: {}... (dummy)", hex::encode(&dummy_sig[..4]));
 
-    // 8. Simulate Execution using bitcoin_scriptexec
-    println!("\n--- Simulating Execution ---");
-
-    // Convert scriptSig ScriptBuf to Vec<Vec<u8>> witness format
+    // 8. Simulate Execution
+    // No compilation needed now
     let witness_1 = convert_scriptbuf_to_witness(script_sig_1)?;
     let witness_2 = convert_scriptbuf_to_witness(script_sig_2)?;
 
-    // Create custom options with minimal checks disabled
     let mut exec_options = Options::default();
     exec_options.require_minimal = false;
-    // exec_options.verify_minimal_if = false; // Keep minimal IF check enabled for now
 
-    println!("\nExecuting Tx1 (scriptPubKey_1 + witness_1)...");
-    // Use the custom execute function with modified options
+    println!("\nExecuting Tx1 ...");
     let exec_result_1 = execute_script_with_witness_custom_opts(
-        script_pubkey_1.clone(),
+        script_pubkey_1.clone(), // Pass ScriptBuf directly
         witness_1,
         exec_options.clone(),
     );
@@ -390,10 +435,12 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
         return Err("Tx1 FAILED execution!".into());
     }
 
-    println!("\nExecuting Tx2 (scriptPubKey_2 + witness_2)...");
-    // Use the custom execute function with modified options
-    let exec_result_2 =
-        execute_script_with_witness_custom_opts(script_pubkey_2.clone(), witness_2, exec_options);
+    println!("\nExecuting Tx2 ...");
+    let exec_result_2 = execute_script_with_witness_custom_opts(
+        script_pubkey_2.clone(), // Pass ScriptBuf directly
+        witness_2,
+        exec_options,
+    );
     if exec_result_2.success {
         println!("Tx2 Succeeded (simulated).");
         println!("Tx2 Result: {}", exec_result_2);
@@ -408,39 +455,32 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// Translates f1(x): x > F1_THRESHOLD into Bitcoin Script
-// Assumes x is on top of the stack (as a 4-byte LE integer)
+// Return ScriptBuf
 fn script_f1() -> ScriptBuf {
-    script! {
-        // Stack: [..., x]
-        <F1_THRESHOLD> // Stack: [..., x, 100]
-        // OP_GREATERTHAN checks stack[-2] > stack[-1]. This checks x > 100.
-        OP_GREATERTHAN // Stack: [..., 1] or [..., 0]
-        OP_VERIFY      // Fail script if result is not true (1)
+    script! { // Use bitcoin_script::script!
+        <F1_THRESHOLD>
+        OP_GREATERTHAN
+        OP_VERIFY
     }
+    .compile()
 }
 
-// Translates f2(x): x < F2_THRESHOLD into Bitcoin Script
-// Assumes x is on top of the stack (as a 4-byte LE integer)
+// Return ScriptBuf
 fn script_f2() -> ScriptBuf {
-    script! {
-        // Stack: [..., x]
-        <F2_THRESHOLD> // Stack: [..., x, 200]
-        // OP_LESSTHAN checks stack[-2] < stack[-1]. This checks x < 200.
-        OP_LESSTHAN    // Stack: [..., 1] or [..., 0]
-        OP_VERIFY      // Fail script if result is not true (1)
+    script! { // Use bitcoin_script::script!
+        <F2_THRESHOLD>
+        OP_LESSTHAN
+        OP_VERIFY
     }
+    .compile()
 }
 
 // --- Copied/Modified from bitcoin_scriptexec ---
 // Re-add the custom executor function
-use bitcoin::locktime::absolute::LockTime;
-use bitcoin::transaction::{Transaction, Version};
-
 fn execute_script_with_witness_custom_opts(
     script: ScriptBuf,
     witness: Vec<Vec<u8>>,
-    options: Options, // Allow passing custom options
+    options: Options,
 ) -> ExecuteInfo {
     let tx_template = TxTemplate {
         tx: Transaction {
@@ -454,14 +494,8 @@ fn execute_script_with_witness_custom_opts(
         taproot_annex_scriptleaf: Some((bitcoin::hashes::Hash::all_zeros(), None)),
     };
 
-    let mut exec = Exec::new(
-        ExecCtx::Tapscript,
-        options, // Use provided options
-        tx_template,
-        script,
-        witness,
-    )
-    .expect("error creating exec");
+    let mut exec = Exec::new(ExecCtx::Tapscript, options, tx_template, script, witness)
+        .expect("error creating exec");
 
     loop {
         if exec.exec_next().is_err() {
@@ -482,6 +516,14 @@ fn execute_script_with_witness_custom_opts(
 // --- End Copied/Modified ---
 
 fn main() {
+    let x_bytes = 114u32.to_le_bytes();
+    let target_hash_val = collider_hash_blake3(&x_bytes);
+    println!(
+        "Temporary Target Blake3 Hash for x=114: {} (0x{:X})",
+        target_hash_val, target_hash_val
+    );
+
+    // Comment out the actual simulation for now
     if let Err(e) = run_mvp_simulation() {
         eprintln!("Simulation Error: {}", e);
     }
