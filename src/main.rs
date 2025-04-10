@@ -2,8 +2,8 @@
 
 use bitcoin::PublicKey;
 use bitcoin::blockdata::opcodes::all::*;
+use bitcoin::blockdata::script::Instruction;
 use bitcoin::blockdata::script::ScriptBuf;
-use bitcoin::blockdata::script::{Instruction, Instructions};
 use bitcoin_script::script;
 use bitcoin_script_dsl::treepp::*;
 use bitcoin_scriptexec::{Exec, ExecCtx, ExecuteInfo, FmtStack, Options, TxTemplate};
@@ -433,7 +433,6 @@ fn main() {
 // --- Copied/Modified from bitcoin_scriptexec ---
 // We need to modify the options used
 use bitcoin::locktime::absolute::LockTime;
-use bitcoin::taproot::TapLeafHash;
 use bitcoin::transaction::{Transaction, Version};
 
 fn execute_script_with_witness_custom_opts(
@@ -477,8 +476,6 @@ fn execute_script_with_witness_custom_opts(
         final_stack: FmtStack(exec.stack().clone()),
         remaining_script: exec.remaining_script().to_asm_string(),
         stats: exec.stats().clone(),
-        #[cfg(feature = "profiler")]
-        profiler: res.profiler.clone().unwrap_or_default(), // Handle potential None profiler
     }
 }
 // --- End Copied/Modified ---
