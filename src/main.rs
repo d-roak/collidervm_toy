@@ -539,7 +539,6 @@ pub fn blake3_verify_output_script(expected_output: [u8; 32]) -> ScriptBuf {
 
 #[cfg(test)]
 mod tests {
-    use bitvm::execute_script;
 
     use super::*;
 
@@ -560,7 +559,7 @@ mod tests {
         bytes.extend(optimized.to_bytes());
         bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
         let script = ScriptBuf::from_bytes(bytes);
-        let script_asm = script.to_asm_string();
+        //let script_asm = script.to_asm_string();
 
         // Print the script ASM for debugging
         //println!("Blake3 script ASM: {}", script_asm);
