@@ -280,11 +280,13 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     .compile();
 
     // Print the scripts
-    println!("\n--- Scripts ---");
-    println!("Blake3 Hash Script: {}", blake3_script.to_asm_string());
-    println!("Script 1 (Blake3 + F1): {}", script_1.to_asm_string());
-    println!("Script 2 (Blake3 + F2): {}", script_2.to_asm_string());
-    println!("Blake3 Only Script: {}", blake3_only_script.to_asm_string());
+    // Comment for now as the scripts are very big, making debugging through logs hard.
+    // Need to find a more practical way.
+    // println!("\n--- Scripts ---");
+    // println!("Blake3 Hash Script: {}", blake3_script.to_asm_string());
+    // println!("Script 1 (Blake3 + F1): {}", script_1.to_asm_string());
+    // println!("Script 2 (Blake3 + F2): {}", script_2.to_asm_string());
+    // println!("Blake3 Only Script: {}", blake3_only_script.to_asm_string());
 
     // Create witness with just the input x
     let witness_script = script! {
@@ -292,7 +294,7 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     }
     .compile();
 
-    println!("\nWitness Script: {}", witness_script.to_asm_string());
+    //println!("\nWitness Script: {}", witness_script.to_asm_string());
 
     // Convert to witness format
     let witness = convert_scriptbuf_to_witness(witness_script)?;
