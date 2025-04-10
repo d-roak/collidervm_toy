@@ -85,14 +85,14 @@ ColliderVM introduces a hash-based commitment to enforce input consistency.
 
 ```mermaid
 graph TD
-    subgraph ColliderVM Setup (Signer)
+    subgraph "ColliderVM Setup (Signer)"
         direction LR
-        D_Set[Set D = {d1, d2, ..., d_2^L}]
-        subgraph Flow for d1
+        D_Set["Set D = {d1, d2, ..., d_2^L}"]
+        subgraph "Flow for d1"
             direction LR
             tx_1_d1["tx_1,d1 <br> Check: Sig, H(x,r)|_B=d1, f1(x)"] --> tx_2_d1["tx_2,d1 <br> Check: Sig, H(x,r)|_B=d1, f2(x)"] --> ...
         end
-         subgraph Flow for d2
+         subgraph "Flow for d2"
             direction LR
             tx_1_d2["tx_1,d2 <br> Check: Sig, H(x,r)|_B=d2, f1(x)"] --> tx_2_d2["tx_2,d2 <br> Check: Sig, H(x,r)|_B=d2, f2(x)"] --> ...
         end
@@ -100,16 +100,15 @@ graph TD
         D_Set --> Flow for d2
         D_Set --> Flow_for_d_2L[...]
 
-        Signer --> D_Set(Generate 2^L Flows)
+        Signer -->|"Generate 2^L Flows"| D_Set
     end
 
-    subgraph ColliderVM Execution (Operator)
-        Operator -- Knows x --> FindPair{Find (r, d) s.t. H(x,r)|_B = d}
-        FindPair -- Found pair for d_i --> SelectFlow(Select Flow d_i)
+    subgraph "ColliderVM Execution (Operator)"
+        Operator --"Knows x"--> FindPair["Find (r, d) s.t. H(x,r)|_B = d"]
+        FindPair --"Found pair for d_i"--> SelectFlow["Select Flow d_i"]
         SelectFlow --> ExecuteFlow["Execute tx_1,d_i ... tx_k,d_i <br> Witness: (x, r, sig)"]
-        ExecuteFlow --> Result{Success if f(x)=1}
+        ExecuteFlow --> Result["Success if f(x)=1"]
     end
-
 ```
 
 ### Security Analysis & Computational Gap
@@ -196,10 +195,10 @@ Signers generate the `2^L` flows _for each_ of the `n` operators (potentially us
 
 ```mermaid
 graph TD
-    subgraph Deposit Phase (Alice, Signers, Operators)
-        A[Alice] -- Send 1 BTC --> SMulti(Signers' Multisig Address: txAlice ON-CHAIN)
-        Signers -- For each Operator 'j' --> GenFlows_j(Create 2^L presigned flows for Verifier V <br> OFF-CHAIN Storage by Operator j)
-        GenFlows_j -- contains --> TxEnd_j("... --> txEnd_j <br> Spends txAlice <br> Pays 1 BTC to Operator j")
+    subgraph "Deposit Phase (Alice, Signers, Operators)"
+        A[Alice] --"Send 1 BTC"--> SMulti["Signers' Multisig Address: txAlice ON-CHAIN"]
+        Signers --"For each Operator 'j'"--> GenFlows_j["Create 2^L presigned flows for Verifier V <br> OFF-CHAIN Storage by Operator j"]
+        GenFlows_j --"contains"--> TxEnd_j["... --> txEnd_j <br> Spends txAlice <br> Pays 1 BTC to Operator j"]
     end
 ```
 
