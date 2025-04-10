@@ -283,36 +283,26 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     println!("  r: {} (dummy nonce)", hex::encode(&operator_r));
     println!("sig: {}... (dummy)", hex::encode(&dummy_sig[..4]));
 
-    // 8. Simulate Execution (using bitcoin_scriptexec)
+    // 8. Simulate Execution
     println!("\n--- Simulating Execution ---");
 
-    // Execute script - Pass only script_sig
-    println!(
-        "WARNING: execute_script called with only script_sig. Verification against specific script_pubkey might be skipped by the executor."
-    );
-    let exec_result_1 = execute_script(script_sig_1.clone()); // Pass only script_sig
-    println!("Tx1 Result: {:?}", exec_result_1.error);
+    let exec_result_1 = execute_script(script_sig_1.clone());
     if exec_result_1.success {
         println!("Tx1 Succeeded (simulated).");
+        println!("Tx1 Result: {:?}", exec_result_1);
     } else {
-        println!("Tx1 FAILED execution! Error: {:?}", exec_result_1.error);
-        // Add debug info if failure
-        println!("Final Stack (Tx1): {:?}", exec_result_1.final_stack);
-        return Ok(());
+        println!("Tx1 FAILED execution!");
+        return Err("Tx1 FAILED execution!".into());
     }
 
     println!("\nExecuting Tx2 (f2)...");
-    // Execute script - Pass both scriptSig and scriptPubKey
-    // Note: Still simulating execution against its *own* scriptPubKey, not Tx1's.
     let exec_result_2 = execute_script(script_sig_2.clone());
-    println!("Tx2 Result: {:?}", exec_result_2.error);
     if exec_result_2.success {
         println!("Tx2 Succeeded (simulated).");
+        println!("Tx2 Result: {:?}", exec_result_2);
     } else {
-        println!("Tx2 FAILED execution! Error: {:?}", exec_result_2.error);
-        // Add debug info if failure
-        println!("Final Stack (Tx2): {:?}", exec_result_2.final_stack);
-        return Ok(());
+        println!("Tx2 FAILED execution!");
+        return Err("Tx2 FAILED execution!".into());
     }
 
     println!("\n--- Simulation Complete ---");
