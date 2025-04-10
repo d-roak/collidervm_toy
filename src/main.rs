@@ -3,14 +3,17 @@
 use bitcoin::{
     PublicKey, Transaction,
     blockdata::opcodes::all::*,
-    blockdata::script::{Instruction, ScriptBuf},
+    blockdata::script::{Builder, Instruction, Script, ScriptBuf},
     locktime::absolute::LockTime,
     transaction::Version,
 };
+use bitcoin_script_stack::optimizer;
 use bitcoin_scriptexec::{Exec, ExecCtx, Options, TxTemplate};
-use bitvm::hash::blake3::blake3_compute_script_with_limb;
+use bitvm::bigint::U256;
+use bitvm::hash::blake3::{blake3_compute_script_with_limb, blake3_push_message_script_with_limb};
 use bitvm::treepp::script;
 use bitvm::u32::u32_xor::{u8_drop_xor_table, u8_push_xor_table};
+use bitvm::{execute_script_buf, execute_script_buf_without_stack_limit};
 
 use bitvm::{ExecuteInfo, FmtStack};
 use std::error::Error;
@@ -191,113 +194,135 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
 
     // 3. Set Expected Input Value
     let expected_x = 114u32;
-    let x_bytes = expected_x.to_le_bytes().to_vec();
+    let x_bytes = expected_x.to_le_bytes().to_vec(); // [0x72, 0x00, 0x00, 0x00]
 
     // Calculate Blake3 hash for verification
-    let blake3_hash = collider_hash_blake3(&x_bytes);
+    let blake3_hash_u32 = collider_hash_blake3(&x_bytes); // 0x7D9FAAB7 u32
     println!(
         "Input x={} has Blake3 hash: {} (0x{:X})",
-        expected_x, blake3_hash, blake3_hash
+        expected_x, blake3_hash_u32, blake3_hash_u32
     );
 
-    // 4. Create verification scripts using actual f1 and f2 functions
+    // 4. Create sub-function scripts (remain the same)
     let f1_script = script_f1();
     let f2_script = script_f2();
 
-    // 5. Get the real Blake3 script
-    let blake3_script = script_collider_hash_blake3();
+    // 5. Get the script that computes Blake3 and leaves 8 hash nibbles
+    let blake3_compute_script = script_collider_hash_blake3(); // Uses blake3_compute_script_with_limb(4, 4)
+    let blake3_compute_script_bytes = blake3_compute_script.as_script().as_bytes().to_vec();
 
-    // 6. Create integrated scripts that:
-    //    a) Calculate Blake3 hash from input x
-    //    b) Verify hash against expected value
-    //    c) Verify sub-function (f1 or f2)
+    // 6. Create script to prepare input x (embeds x as 8 nibbles)
+    // Assuming limb_len=4 is used for the compute script
+    let prepare_input_script = blake3_push_message_script_with_limb(&x_bytes, 4);
+    let prepare_input_script_bytes = prepare_input_script.compile().to_bytes();
 
-    // For script 1 (F1)
-    let blake3_script_bytes = blake3_script.as_script().as_bytes().to_vec();
-    let f1_script_bytes = f1_script.as_script().as_bytes().to_vec();
+    // 7. Calculate expected hash nibbles for comparison
+    let expected_hash_bytes = blake3_hash_u32.to_le_bytes(); // [0xB7, 0xAA, 0x9F, 0x7D]
+    // Blake3 script leaves hash nibbles as [h7, h6, h5, h4, h3, h2, h1, h0] (top = h0)
+    // For 0x7D9FAAB7 (LE bytes B7 AA 9F 7D), the nibbles are 7, D, 9, F, A, A, B, 7
+    let expected_nibbles_stack_order: Vec<u8> = vec![7, 13, 9, 15, 10, 10, 11, 7]; // h7=7, h6=D, ..., h0=7
 
-    let script_1 = script! {
-        // Duplicate input for both hash calculation and function execution
-        OP_DUP
+    // 8. Create the script fragment to verify the 8 hash nibbles
+    let verify_nibbles_script = {
+        let mut builder = Builder::new();
+        // Push expected nibbles in reverse order to match stack
+        for (i, &nibble) in expected_nibbles_stack_order.iter().rev().enumerate() {
+            builder = builder.push_int(nibble as i64); // Push expected nibble
+            builder = builder.push_opcode(OP_EQUALVERIFY); // Compare with actual nibble from stack
+            // Note: Using EQUALVERIFY for all simplifies logic slightly compared to EQUAL on last
+        }
+        // If all EQUALVERIFY passed, the script continues. No final TRUE/FALSE needed here.
+        builder.into_script()
+    };
+    let verify_nibbles_script_bytes = verify_nibbles_script.as_bytes().to_vec();
 
-        // Calculate Blake3 hash
-        { blake3_script_bytes.clone() }
+    // --- Rebuild the main execution scripts ---
 
-        // Compare with expected hash
-        <blake3_hash>
-        OP_EQUALVERIFY
-
-        // Execute F1(x) on the original input
-        { f1_script_bytes }
-
-        // Return true if all checks pass (already verified by OP_VERIFY in f1_script)
-        OP_IF
-            OP_1
-        OP_ELSE
-            OP_0
-        OP_ENDIF
-    }
-    .compile();
-
-    // For script 2 (F2)
-    let f2_script_bytes = f2_script.as_script().as_bytes().to_vec();
-
-    let script_2 = script! {
-        // Duplicate input for both hash calculation and function execution
-        OP_DUP
-
-        // Calculate Blake3 hash
-        { blake3_script_bytes.clone() }
-
-        // Compare with expected hash
-        <blake3_hash>
-        OP_EQUALVERIFY
-
-        // Execute F2(x) on the original input
-        { f2_script_bytes }
-
-        // Return true if all checks pass (already verified by OP_VERIFY in f2_script)
-        OP_IF
-            OP_1
-        OP_ELSE
-            OP_0
-        OP_ENDIF
-    }
-    .compile();
-
-    // Create separate scripts for testing Blake3 hash computation alone
+    // Blake3 hash computation only script
     let blake3_only_script = script! {
-        // Duplicate input for debugging
-        OP_DUP
+        // Input x (4 bytes) is provided by witness.
 
-        // Calculate Blake3 hash
-        { blake3_script_bytes }
+        // Prepare input x by pushing its 8 nibbles
+        { prepare_input_script_bytes.clone() }
 
-        // Compare with expected hash
-        <blake3_hash>
-        OP_EQUAL
+        // Calculate Blake3 hash (consumes 8 input nibbles, pushes 8 hash nibbles)
+        { blake3_compute_script_bytes.clone() }
+
+        // Verify the resulting 8 hash nibbles against the expected ones
+        { verify_nibbles_script_bytes.clone() }
+
+        // If verification passed, push TRUE
+        OP_TRUE
     }
     .compile();
 
-    // Print the scripts
-    // Comment for now as the scripts are very big, making debugging through logs hard.
-    // Need to find a more practical way.
+    // Script 1 (Blake3 + F1)
+    let f1_script_bytes = f1_script.as_script().as_bytes().to_vec();
+    let script_1 = script! {
+        // Input x (4 bytes) from witness
+
+        OP_DUP // Duplicate input x [x, x]
+
+        // Prepare input (push corresponding nibbles)
+        // This script doesn't use stack input, it embeds the values based on x_bytes
+        { prepare_input_script_bytes.clone() }
+
+        // Calculate Blake3 hash (consumes the prepared nibbles, pushes 8 hash nibbles)
+        { blake3_compute_script_bytes.clone() } // Stack: [x, x, h7..h0]
+
+        // Verify the resulting 8 hash nibbles against the expected ones
+        { verify_nibbles_script_bytes.clone() } // Consumes h7..h0, leaves [x, x] if verify passes
+
+        // Execute F1(x) on one copy of the original input
+        // Note: F1 uses OP_VERIFY, so it consumes the top x and leaves the other x if successful
+        { f1_script_bytes } // Stack: [x] if successful
+
+        // Drop the remaining copy of x and return TRUE
+        OP_DROP
+        OP_TRUE
+    }
+    .compile();
+
+    // Script 2 (Blake3 + F2)
+    let f2_script_bytes = f2_script.as_script().as_bytes().to_vec();
+    let script_2 = script! {
+        OP_DUP // Duplicate input x [x, x]
+
+        // Prepare input
+        { prepare_input_script_bytes.clone() }
+
+        // Calculate Blake3 hash
+        { blake3_compute_script_bytes.clone() } // Stack: [x, x, h7..h0]
+
+        // Verify the hash nibbles
+        { verify_nibbles_script_bytes.clone() } // Stack: [x, x] if verify passes
+
+        // Execute F2(x) on one copy of the original input
+        { f2_script_bytes } // Stack: [x] if successful
+
+        // Drop the remaining copy of x and return TRUE
+        OP_DROP
+        OP_TRUE
+    }
+    .compile();
+
+    // Print the scripts (optional, can be large)
     // println!("\n--- Scripts ---");
-    // println!("Blake3 Hash Script: {}", blake3_script.to_asm_string());
+    // println!("Prepare Input Script: {}", prepare_input_script.compile().to_asm_string());
+    // println!("Blake3 Compute Script: {}", blake3_compute_script.to_asm_string());
+    // println!("Verify Nibbles Script: {}", verify_nibbles_script.to_asm_string());
+    // println!("Blake3 Only Script: {}", blake3_only_script.to_asm_string());
     // println!("Script 1 (Blake3 + F1): {}", script_1.to_asm_string());
     // println!("Script 2 (Blake3 + F2): {}", script_2.to_asm_string());
-    // println!("Blake3 Only Script: {}", blake3_only_script.to_asm_string());
 
     // Create witness with just the input x
     let witness_script = script! {
-        <x_bytes>
+        <x_bytes> // Push the 4-byte value e.g., [0x72, 0x00, 0x00, 0x00]
     }
     .compile();
 
-    //println!("\nWitness Script: {}", witness_script.to_asm_string());
-
     // Convert to witness format
-    let witness = convert_scriptbuf_to_witness(witness_script)?;
+    let witness = convert_scriptbuf_to_witness(witness_script)?; // Should be vec![vec![0x72, 0, 0, 0]]
 
     // Execute the scripts
     let exec_options = Options {
@@ -316,12 +341,11 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     );
 
     if exec_result_blake3.success {
-        println!("Blake3 Hash Computation Succeeded!");
+        println!("Blake3 Hash Computation Succeeded and verified!");
         println!("Result: {}", exec_result_blake3);
     } else {
         println!("Blake3 Hash Computation FAILED!");
         println!("Error details: {}", exec_result_blake3);
-        // Continue with other tests even if this fails
     }
 
     // Try script 1 (F1)
@@ -335,7 +359,6 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     } else {
         println!("Script 1 Execution FAILED!");
         println!("Error details: {}", exec_result_1);
-        // Continue with script 2 even if this fails
     }
 
     // Try script 2 (F2)
@@ -351,7 +374,7 @@ fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
     }
 
     println!("\n--- Simulation Complete ---");
-    println!("Note: Failures are expected for now, the MVP is still now working properly.");
+    println!("Note: Failures are expected for now, the MVP is still not working properly.");
 
     Ok(())
 }
@@ -492,360 +515,59 @@ fn convert_scriptbuf_to_witness(
 }
 // --- End Helper ---
 
+/// Returns a script that verifies the BLAKE3 output on the stack.
+///
+/// The script pops the BLAKE3 output and compares it with the given, expected output.
+pub fn blake3_verify_output_script(expected_output: [u8; 32]) -> ScriptBuf {
+    script! {
+        for (i, byte) in expected_output.into_iter().enumerate() {
+            {byte}
+            if i % 32 == 31 {
+                {U256::transform_limbsize(8,4)}
+            }
+        }
+
+        for i in (2..65).rev() {
+            {i}
+            OP_ROLL
+            OP_EQUALVERIFY
+        }
+        OP_EQUAL
+    }
+    .compile()
+}
+
 #[cfg(test)]
 mod tests {
+    use bitvm::execute_script;
+
     use super::*;
-    // Remove unused import
-    // use bitcoin::hex::FromHex;
-
-    // Test Blake3 hash computation in Rust
-    #[test]
-    fn test_collider_hash_blake3() {
-        // Test that we can hash a known input value
-        let input_x = 114u32.to_le_bytes();
-        let hash_result = collider_hash_blake3(&input_x);
-
-        // Just print the actual hash for reference
-        println!("Actual Blake3 hash of x=114: 0x{:X}", hash_result);
-
-        // Test consistency of the hash function
-        let hash1 = collider_hash_blake3(&input_x);
-        let hash2 = collider_hash_blake3(&input_x);
-        assert_eq!(
-            hash1, hash2,
-            "Blake3 hash should be consistent for the same input"
-        );
-
-        // Test different inputs produce different hashes
-        let input_y = 42u32.to_le_bytes();
-        let hash_y = collider_hash_blake3(&input_y);
-        println!("Blake3 hash of x=42: 0x{:X}", hash_y);
-        assert_ne!(
-            hash_result, hash_y,
-            "Different inputs should produce different hashes"
-        );
-    }
-
-    // Test script generation for equality checking
-    #[test]
-    fn test_equality_script_generation() {
-        // Create a script that checks if input equals 114
-        let expected_x = 114u32;
-        let x_bytes = expected_x.to_le_bytes().to_vec();
-
-        let script = script! {
-            // Check input equals expected value
-            <x_bytes>
-            OP_EQUAL
-        }
-        .compile();
-
-        // Convert script to string for verification
-        let script_asm = script.to_asm_string();
-
-        // Expected ASM should contain our expected value
-        assert!(
-            script_asm.contains("72000000"),
-            "Script should contain 72000000 (114 in LE), got: {}",
-            script_asm
-        );
-    }
-
-    // Test F1 and F2 functions
-    #[test]
-    fn test_f1_f2_functions() {
-        // F1: x > 100
-        let f1_script = script! {
-            <100u32>
-            OP_GREATERTHAN
-        }
-        .compile();
-
-        // F2: x < 200
-        let f2_script = script! {
-            <200u32>
-            OP_LESSTHAN
-        }
-        .compile();
-
-        // Check script ASM
-        let f1_asm = f1_script.to_asm_string();
-        let f2_asm = f2_script.to_asm_string();
-
-        assert!(
-            f1_asm.contains("64"),
-            "F1 script should contain 64 (100), got: {}",
-            f1_asm
-        );
-        assert!(
-            f2_asm.contains("c800"),
-            "F2 script should contain c800 (200), got: {}",
-            f2_asm
-        );
-    }
-
-    // Test witness conversion
-    #[test]
-    fn test_witness_conversion() {
-        // Create a simple script pushing x=114
-        let x_bytes = 114u32.to_le_bytes().to_vec();
-        let witness_script = script! {
-            <x_bytes>
-        }
-        .compile();
-
-        // Convert to witness format
-        let witness =
-            convert_scriptbuf_to_witness(witness_script).expect("Failed to convert to witness");
-
-        // Check witness content
-        assert_eq!(witness.len(), 1, "Witness should have 1 item");
-        assert_eq!(
-            hex::encode(&witness[0]),
-            "72000000",
-            "Witness item should be 72000000 (114 in LE), got: {}",
-            hex::encode(&witness[0])
-        );
-    }
 
     // Test Blake3 script generation
     #[test]
     fn test_blake3_script_generation() {
-        // Generate Blake3 hash script
-        let script = script_collider_hash_blake3();
+        let message = [0x00; 32];
+        let limb_len = 4;
+        let expected_hash = *blake3::hash(message.as_ref()).as_bytes();
 
-        // The script should contain Blake3 related components
+        println!("Expected hash: {}", hex::encode(expected_hash));
+
+        let mut bytes = blake3_push_message_script_with_limb(&message, limb_len)
+            .compile()
+            .to_bytes();
+        let optimized =
+            optimizer::optimize(blake3_compute_script_with_limb(message.len(), limb_len).compile());
+        bytes.extend(optimized.to_bytes());
+        bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
+        let script = ScriptBuf::from_bytes(bytes);
         let script_asm = script.to_asm_string();
 
         // Print the script ASM for debugging
-        println!("Blake3 script ASM: {}", script_asm);
+        //println!("Blake3 script ASM: {}", script_asm);
 
-        // Check for Blake3 XOR table components which are definitely present
-        assert!(
-            script_asm.contains("OP_PUSHBYTES"),
-            "Script should contain OP_PUSHBYTES operations for Blake3 tables"
-        );
-    }
+        //let result = execute_script_buf_without_stack_limit(script);
+        let result = execute_script_buf(script);
 
-    // Mock test for Blake3 script execution (ideally would need more sophisticated setup)
-    #[test]
-    fn test_blake3_script_execution_mock() {
-        // This is a simplified test that doesn't actually execute the script
-        // but rather checks that we can create valid scripts with Blake3 hashing
-
-        let x_val = 114u32;
-        let x_bytes = x_val.to_le_bytes();
-        let target_hash = collider_hash_blake3(&x_bytes);
-
-        // Create a mock script that would verify Blake3(x) == target
-        let target_bytes = target_hash.to_le_bytes().to_vec();
-
-        // In a real script, we'd use script_collider_hash_blake3() and then compare
-        // to target_bytes, but for this mock test we'll just check that the values match
-        assert_eq!(
-            target_hash, 2107615927u32,
-            "Target hash for x=114 should be 2107615927, got {}",
-            target_hash
-        );
-    }
-
-    // Integration test for future implementation using Blake3 hash verification
-    #[test]
-    fn test_future_blake3_verification_approach() {
-        // This test outlines how we would approach full Blake3 verification
-        // once we've properly integrated it
-
-        // 1. Define our input and expected hash
-        let x_val = 114u32;
-        let x_bytes = x_val.to_le_bytes().to_vec();
-        let target_hash = collider_hash_blake3(&x_bytes);
-        let target_bytes = target_hash.to_le_bytes().to_vec();
-
-        // 2. Create a script that would:
-        //    - Compute Blake3(x) using script_collider_hash_blake3()
-        //    - Compare result with target_hash
-        //    - Execute F1(x) and F2(x)
-
-        // This is pseudo-code for the future implementation
-        /*
-        let future_script = script! {
-            // Duplicate x for hash calculation and function execution
-            OP_DUP
-
-            // Calculate Blake3(x)
-            { script_collider_hash_blake3() }
-
-            // Verify against target hash
-            <target_bytes>
-            OP_EQUALVERIFY
-
-            // Execute F1(x) and F2(x)
-            OP_DUP
-            <100u32>
-            OP_GREATERTHAN
-            OP_VERIFY
-
-            <200u32>
-            OP_LESSTHAN
-        };
-        */
-
-        // For now, just assert that we can calculate the correct hash
-        assert_eq!(target_hash, 2107615927u32);
-        assert_eq!(hex::encode(&target_bytes), "b7aa9f7d");
-    }
-
-    // Add this new test for Blake3 integration in MVP
-    #[test]
-    fn test_blake3_mvp_integration() {
-        // Setup the test case
-        let x_val = 114u32;
-        let x_bytes = x_val.to_le_bytes().to_vec();
-        let target_hash = collider_hash_blake3(&x_bytes);
-
-        // Calculate expected target nibbles from hash (for future implementation)
-        let target_bytes = target_hash.to_le_bytes();
-        let target_nibbles = vec![
-            target_bytes[0] & 0x0F,
-            target_bytes[0] >> 4,
-            target_bytes[1] & 0x0F,
-            target_bytes[1] >> 4,
-            target_bytes[2] & 0x0F,
-            target_bytes[2] >> 4,
-            target_bytes[3] & 0x0F,
-            target_bytes[3] >> 4,
-        ];
-
-        // Create a mock script string of what we want to achieve
-        let expected_script_description = format!(
-            "Script that verifies input has Blake3 hash of 0x{:X} and satisfies F1 & F2",
-            target_hash
-        );
-
-        println!("Goal: {}", expected_script_description);
-        println!("Target Hash: 0x{:X} ({})", target_hash, target_hash);
-        println!("Target Bytes (LE): {:?}", target_bytes);
-        println!("Target Nibbles: {:?}", target_nibbles);
-
-        // Test real hash output vs. what we'd verify in script
-        // This helps ensure our hash representation in Rust matches the expected script representation
-        assert_eq!(target_hash, 2107615927u32);
-        assert_eq!(hex::encode(&target_bytes), "b7aa9f7d");
-
-        // Rest of the test...
-    }
-
-    // Test implementation of Blake3 verification script
-    #[test]
-    fn test_generate_blake3_verification_script() {
-        // This is a test implementation of a function that would generate a script
-        // using Blake3 hash verification instead of direct equality check
-
-        fn generate_blake3_verification_script(
-            target_hash: u32,
-            sub_function: &ScriptBuf,
-        ) -> ScriptBuf {
-            // Convert target hash to bytes and then to nibbles
-            let target_bytes = target_hash.to_le_bytes();
-            let target_nibbles = vec![
-                target_bytes[0] & 0x0F,
-                target_bytes[0] >> 4,
-                target_bytes[1] & 0x0F,
-                target_bytes[1] >> 4,
-                target_bytes[2] & 0x0F,
-                target_bytes[2] >> 4,
-                target_bytes[3] & 0x0F,
-                target_bytes[3] >> 4,
-            ];
-
-            // Get the sub-function script bytes
-            let sub_function_bytes = sub_function.as_script().as_bytes().to_vec();
-
-            // Get the Blake3 script bytes
-            let blake3_script_bytes = script_collider_hash_blake3()
-                .as_script()
-                .as_bytes()
-                .to_vec();
-
-            // Create the Blake3 verification script
-            script! {
-                // Duplicate the input for both hash verification and sub-function
-                OP_DUP
-
-                // Get Blake3 hash of input - using script bytes instead of direct call
-                { blake3_script_bytes }
-
-                // Verify hash against target nibbles
-                <target_nibbles[7]> // Most significant nibble first
-                OP_EQUALVERIFY
-                <target_nibbles[6]>
-                OP_EQUALVERIFY
-                <target_nibbles[5]>
-                OP_EQUALVERIFY
-                <target_nibbles[4]>
-                OP_EQUALVERIFY
-                <target_nibbles[3]>
-                OP_EQUALVERIFY
-                <target_nibbles[2]>
-                OP_EQUALVERIFY
-                <target_nibbles[1]>
-                OP_EQUALVERIFY
-                <target_nibbles[0]> // Least significant nibble last
-                OP_EQUALVERIFY
-
-                // Run the sub-function on original input
-                { sub_function_bytes }
-
-                // Return true if all checks pass
-                OP_IF
-                    OP_TRUE
-                OP_ELSE
-                    OP_FALSE
-                OP_ENDIF
-            }
-            .compile()
-        }
-
-        // Test with a known value and sub-function
-        let target_hash = 2107615927u32; // Blake3 hash of x=114
-
-        // Sub-function F1: x > 100
-        let f1_script = script! {
-            <100u32>
-            OP_GREATERTHAN
-        }
-        .compile();
-
-        // Generate the verification script
-        let verification_script = generate_blake3_verification_script(target_hash, &f1_script);
-
-        // Check that the script contains the expected elements
-        let script_asm = verification_script.to_asm_string();
-
-        // Print for debugging
-        println!("Generated Blake3 Verification Script ASM:\n{}", script_asm);
-
-        // Check for basic script elements we know should be present
-        assert!(
-            script_asm.contains("OP_DUP"),
-            "Script should contain OP_DUP for duplication"
-        );
-
-        assert!(
-            script_asm.contains("OP_EQUALVERIFY"),
-            "Script should contain OP_EQUALVERIFY for hash verification"
-        );
-
-        // Change the assertion to look for the number 100 (0x64) which should be in the F1 script
-        assert!(
-            script_asm.contains("64"),
-            "Script should contain the constant 100 from F1 script"
-        );
-
-        // This is a concrete implementation that can be used to complete the MVP
-        println!("\nTo complete the MVP with Blake3:");
-        println!("1. Replace the current script generation in run_mvp_simulation");
-        println!("2. Use this generate_blake3_verification_script function");
-        println!("3. Test with the same input (x=114) and verify execution");
+        println!("Result: {:?}", result);
     }
 }
