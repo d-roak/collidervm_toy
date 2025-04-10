@@ -85,23 +85,22 @@ ColliderVM introduces a hash-based commitment to enforce input consistency.
 
 ```mermaid
 graph TD
-    subgraph "ColliderVM Setup (Signer)"
+    D_Set["Set D = {d1, d2, ..., d_2^L}"]
+    
+    subgraph Flow_for_d1
         direction LR
-        D_Set["Set D = {d1, d2, ..., d_2^L}"]
-        subgraph "Flow for d1"
-            direction LR
-            tx_1_d1["tx_1,d1 <br> Check: Sig, H(x,r)|_B=d1, f1(x)"] --> tx_2_d1["tx_2,d1 <br> Check: Sig, H(x,r)|_B=d1, f2(x)"] --> ...
-        end
-         subgraph "Flow for d2"
-            direction LR
-            tx_1_d2["tx_1,d2 <br> Check: Sig, H(x,r)|_B=d2, f1(x)"] --> tx_2_d2["tx_2,d2 <br> Check: Sig, H(x,r)|_B=d2, f2(x)"] --> ...
-        end
-        D_Set --> Flow for d1
-        D_Set --> Flow for d2
-        %% Removed the problematic line: D_Set --> Flow_for_d_2L[...]
-
-        Signer -->|"Generate 2^L Flows"| D_Set
+        tx_1_d1["tx_1,d1 <br> Check: Sig, H(x,r)|_B=d1, f1(x)"] --> tx_2_d1["tx_2,d1 <br> Check: Sig, H(x,r)|_B=d1, f2(x)"] --> tx_i,d1
     end
+
+    subgraph Flow_for_d2
+        direction LR
+        tx_1_d2["tx_1,d2 <br> Check: Sig, H(x,r)|_B=d2, f1(x)"] --> tx_2_d2["tx_2,d2 <br> Check: Sig, H(x,r)|_B=d2, f2(x)"] --> tx_i,d2
+    end
+
+    D_Set --> Flow_for_d1
+    D_Set --> Flow_for_d2
+
+    Signer -->|"Generate 2^L Flows"| D_Set
 
     subgraph "ColliderVM Execution (Operator)"
         Operator --"Knows x"--> FindPair["Find (r, d) s.t. H(x,r)|_B = d"]
