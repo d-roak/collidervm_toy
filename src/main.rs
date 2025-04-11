@@ -1,374 +1,42 @@
-#![feature(proc_macro_hygiene)] // If using bitcoin_script macro
+#![feature(proc_macro_hygiene)] // Required for bitvm scripts
 
-use bitcoin::{PublicKey, blockdata::script::ScriptBuf};
-use bitcoin_script_stack::optimizer;
-use bitvm::bigint::U256;
-use bitvm::execute_script_buf;
-use bitvm::hash::blake3::{blake3_compute_script_with_limb, blake3_push_message_script_with_limb};
-use bitvm::treepp::script;
-use bitvm::u32::u32_xor::{u8_drop_xor_table, u8_push_xor_table};
+mod collidervm_toy;
+mod simulation;
 
-use std::error::Error;
-
-// Import for Rust Blake3
-use blake3::Hasher;
-
-// --- Configuration ---
-#[derive(Debug, Clone)]
-pub struct ColliderVmConfig {
-    pub l: usize, // e.g., 4 => D size = 16
-    pub b: usize, // e.g., 8 => check first byte of hash
-    pub k: usize, // Fixed to 2 for MVP
-                  // hash_function implied as SHA256 for MVP
-}
-
-// --- Data Types ---
-// Using Vec<u8> for simplicity in MVP
-pub type InputX = Vec<u8>;
-pub type NonceR = Vec<u8>;
-pub type FlowIdD = Vec<u8>; // Should have length L/8
-pub type Signature = Vec<u8>; // Dummy signature for MVP
-
-// --- Parties ---
-// Simplified for MVP - only need signer's pubkey
-pub struct SignerInfo {
-    pub pubkey: PublicKey,
-    // In a real scenario, the signer would have the private key
-}
-
-// --- MVP Toy Function ---
-// f(x) = f1(x) AND f2(x)
-// Example: f(x) is true if x (as u32 LE) is > 100 AND < 200
-const F1_THRESHOLD: u32 = 100;
-const F2_THRESHOLD: u32 = 200;
-
-// --- Hash Functions ---
-
-// Blake3 Hash (New)
-
-/// Rust implementation of the Blake3 hash collider puzzle.
-/// Takes 4-byte x, returns first 4 bytes of Blake3(x) as u32 LE.
-fn collider_hash_blake3(x_bytes: &[u8]) -> u32 {
-    if x_bytes.len() != 4 {
-        eprintln!(
-            "ERROR: collider_hash_blake3 expects 4 bytes, got {}",
-            x_bytes.len()
-        );
-        return 0;
-    }
-    let mut hasher = Hasher::new();
-    hasher.update(x_bytes);
-    let hash_bytes = hasher.finalize();
-    // Extract the first 4 bytes and convert to u32 LE
-    let hash_prefix: [u8; 4] = hash_bytes.as_bytes()[0..4]
-        .try_into()
-        .expect("Blake3 hash is too short");
-    u32::from_le_bytes(hash_prefix)
-}
-
-/// Generates Bitcoin Script for the Blake3 hash puzzle.
-/// Assumes x (4 bytes LE as u32) is on top of the stack.
-/// Leaves the first 4 bytes of Blake3(x) (as u32 LE) on stack.
-fn _script_collider_hash_blake3() -> ScriptBuf {
-    script! {
-        // Initialize Blake3 lookup table
-        { u8_push_xor_table() }
-
-        // Perform Blake3 hash on the input (4 bytes)
-        { blake3_compute_script_with_limb(4, 4) }
-
-        // At this point we have the 32-byte (64 nibbles) Blake3 hash on the stack
-        // We'll just keep the first 4 bytes (8 nibbles) and drop the rest
-
-        // Drop nibbles 9-64 (keeping only the first 8 nibbles)
-        for _ in 8..64 {
-            OP_DROP
-        }
-
-        // Clean up the Blake3 lookup table
-        { u8_drop_xor_table() }
-    }
-    .compile()
-}
-
-// --- Script Generation ---
-
-/// Generates the scriptPubKey for a ColliderVM transaction (MVP simplified).
-/// Checks: 1. Input matches expected value, 2. Subfunction Fi
-fn _generate_script_pubkey(
-    signer_pubkey: &PublicKey,
-    _target_hash_value: u32, // Prefix with underscore since it's unused
-    sub_function_script: &ScriptBuf,
-) -> ScriptBuf {
-    // Witness stack expected by this script: [signer_sig, r, x] (x at top initially)
-    // In our MVP we'll just directly verify that x is the expected value (114)
-    // This is a simplification - in the real implementation, we'd use Blake3 hashing
-
-    let sub_function_script_bytes = sub_function_script.as_script().as_bytes().to_vec();
-
-    // The expected value we want to verify (x=114 -> 0x72000000 in LE)
-    let expected_x_bytes = 114u32.to_le_bytes().to_vec();
-
-    script! {
-        // Duplicate the input for both equality check and subfunction
-        OP_DUP
-
-        // Check that input equals our expected value (114)
-        <expected_x_bytes>
-        OP_EQUALVERIFY
-
-        // Run the subfunction on x
-        { sub_function_script_bytes }
-
-        // Handle signature verification (simplified in MVP)
-        OP_DROP
-        <signer_pubkey.to_bytes()>
-        OP_DROP
-        OP_DROP
-        OP_TRUE
-    }
-    .compile()
-}
-
-// --- Simulation Logic ---
-
-/// Simulates the operator finding a valid x for a target d_val and config B.
-/// Uses the Blake3 hash puzzle H(x) == target_hash_val. 'r' is not used.
-fn _find_b_pair_simplified_exact(
-    // _config: &ColliderVmConfig, // Removed unused parameter
-    target_hash_val: u32,
-    candidate_x: &InputX,
-) -> Option<NonceR> {
-    let hash_result = collider_hash_blake3(candidate_x);
-
-    // Safely get u32 value for printing
-    let x_val_for_print = match candidate_x.as_slice().try_into() {
-        Ok(arr) => u32::from_le_bytes(arr),
-        Err(_) => 0, // Default for printing if conversion fails
-    };
-
-    println!(
-        "find_b_pair_simplified_exact: Testing x = {} ({}), H(x) = {} (0x{:X})",
-        x_val_for_print,
-        hex::encode(candidate_x),
-        hash_result,
-        hash_result
-    );
-
-    if hash_result == target_hash_val {
-        println!(
-            "  -> Match found for target H(x) = {} (0x{:X})",
-            target_hash_val, target_hash_val
-        );
-        Some(vec![0u8; 8])
-    } else {
-        println!(
-            "  -> No match for target H(x) = {} (0x{:X})",
-            target_hash_val, target_hash_val
-        );
-        None
-    }
-}
-
-// --- Main Simulation ---
-fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
-    println!("--- ColliderVM Toy Simulation ---");
-
-    // Configuration
-    let config = ColliderVmConfig { l: 4, b: 8, k: 2 }; // B=8 bits
-    println!("Config: L={}, B={}, k={}", config.l, config.b, config.k);
-
-    // Setup Signer
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let (_privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
-    let signer_pubkey = bitcoin::PublicKey::new(pubkey);
-    println!("Signer PubKey: {}", signer_pubkey);
-
-    // Set Expected Input Value
-    let expected_x = 114u32;
-    let x_bytes = expected_x.to_le_bytes().to_vec(); // [0x72, 0x00, 0x00, 0x00]
-
-    // Not using these directly anymore, prefix with underscore to silence warnings
-    let _f1_script = script_f1();
-    let _f2_script = script_f2();
-
-    let limb_len = 4;
-
-    // Compute the expected hash once
-    let full_hash = blake3::hash(&x_bytes).as_bytes().to_owned();
-    let expected_hash: [u8; 32] = full_hash[0..32].try_into().unwrap();
-
-    println!("\n--- Execution Results ---");
-
-    // ---- Script 1 (Blake3 + F1) Test ----
-    println!("\nExecuting Script 1 (Blake3 + F1)...");
-
-    // Build the full script with Blake3 hash verification and F1 check
-    let mut script1_bytes = blake3_push_message_script_with_limb(&x_bytes, limb_len)
-        .compile()
-        .to_bytes();
-
-    let optimized1 =
-        optimizer::optimize(blake3_compute_script_with_limb(x_bytes.len(), limb_len).compile());
-    script1_bytes.extend(optimized1.to_bytes());
-
-    // Add verification
-    script1_bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
-
-    // Add F1 script
-    script1_bytes.extend(
-        script! {
-            OP_DROP // Remove the 0x01 from Blake3 verification
-            <114i64> // Push input as minimal integer
-            <100i64> // Push threshold as minimal integer
-            OP_GREATERTHAN // Leaves 0x01 if true
-        }
-        .compile()
-        .to_bytes(),
-    );
-
-    let script1 = ScriptBuf::from_bytes(script1_bytes);
-    let exec_result_1 = execute_script_buf(script1);
-
-    if exec_result_1.success {
-        println!("Script 1 (Blake3 + F1) Execution Succeeded!");
-        println!("Result: {:?}", exec_result_1);
-    } else {
-        println!("Script 1 (Blake3 + F1) Execution FAILED!");
-        println!("Error details: {:?}", exec_result_1);
-    }
-
-    // ---- Script 2 (F2) Test ----
-    println!("\nExecuting Script 2 (Blake3 + F2)...");
-
-    // Build the full script with Blake3 hash verification and F2 check
-    let mut script2_bytes = blake3_push_message_script_with_limb(&x_bytes, limb_len)
-        .compile()
-        .to_bytes();
-
-    let optimized2 =
-        optimizer::optimize(blake3_compute_script_with_limb(x_bytes.len(), limb_len).compile());
-    script2_bytes.extend(optimized2.to_bytes());
-
-    // Add verification
-    script2_bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
-
-    // Add F2 script
-    script2_bytes.extend(
-        script! {
-            OP_DROP // Remove the 0x01 from Blake3 verification
-            <114i64> // Push input as minimal integer
-            <200i64> // Push threshold as minimal integer
-            OP_LESSTHAN // Leaves 0x01 if true
-        }
-        .compile()
-        .to_bytes(),
-    );
-
-    let script2 = ScriptBuf::from_bytes(script2_bytes);
-    let exec_result_2 = execute_script_buf(script2);
-
-    if exec_result_2.success {
-        println!("Script 2 (Blake3 + F2) Execution Succeeded!");
-        println!("Result: {:?}", exec_result_2);
-    } else {
-        println!("Script 2 (Blake3 + F2) Execution FAILED!");
-        println!("Error details: {:?}", exec_result_2);
-    }
-
-    println!("\n--- Simulation Complete ---");
-    println!("Successfully verified:");
-    println!("1. Script 1 (Blake3 + F1) executed successfully.");
-    println!("2. Script 2 (Blake3 + F2) executed successfully.");
-
-    Ok(())
-}
-
-fn script_f1() -> ScriptBuf {
-    script! {
-        <F1_THRESHOLD>
-        OP_GREATERTHAN
-        OP_VERIFY
-    }
-    .compile()
-}
-
-fn script_f2() -> ScriptBuf {
-    script! { // Use bitcoin_script::script!
-        <F2_THRESHOLD>
-        OP_LESSTHAN
-        OP_VERIFY
-    }
-    .compile()
-}
+use collidervm_toy::ColliderVmConfig;
+use std::env;
 
 fn main() {
-    // Show Blake3 hash details for reference
-    let x_bytes = 114u32.to_le_bytes();
-    let blake3_hash_val = collider_hash_blake3(&x_bytes);
-    println!(
-        "Blake3 Hash for x=114: {} (0x{:X})",
-        blake3_hash_val, blake3_hash_val
-    );
+    println!("ColliderVM Toy Simulation");
 
-    // Run the MVP simulation
-    if let Err(e) = run_mvp_simulation() {
-        eprintln!("Simulation Error: {}", e);
-    }
-}
+    // Parse command line arguments for input value or use default
+    let input_value = env::args()
+        .nth(1)
+        .and_then(|arg| arg.parse::<u32>().ok())
+        .unwrap_or(114); // Default input value is 114
 
-/// Returns a script that verifies the BLAKE3 output on the stack.
-///
-/// The script pops the BLAKE3 output and compares it with the given, expected output.
-pub fn blake3_verify_output_script(expected_output: [u8; 32]) -> ScriptBuf {
-    script! {
-        for (i, byte) in expected_output.into_iter().enumerate() {
-            {byte}
-            if i % 32 == 31 {
-                {U256::transform_limbsize(8,4)}
+    // Configure simulation parameters
+    let config = ColliderVmConfig {
+        n: 3, // Number of signers
+        m: 2, // Number of operators
+        l: 4, // L value (log2 of D set size)
+        b: 8, // B value (hash prefix bits)
+        k: 2, // Number of subfunctions (F1 and F2)
+    };
+
+    println!("Running simulation with input value: {}", input_value);
+
+    // Run the simulation
+    match simulation::run_simulation(config, input_value) {
+        Ok(result) => {
+            if result.success {
+                println!("Simulation succeeded! ✅");
+            } else {
+                println!("Simulation failed! ❌");
             }
         }
-
-        for i in (2..65).rev() {
-            {i}
-            OP_ROLL
-            OP_EQUALVERIFY
+        Err(e) => {
+            eprintln!("Error running simulation: {}", e);
         }
-        OP_EQUAL
-    }
-    .compile()
-}
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-
-    // Test Blake3 script generation
-    #[test]
-    fn test_blake3_script_generation() {
-        let message = [0x00; 32];
-        let limb_len = 4;
-        let expected_hash = *blake3::hash(message.as_ref()).as_bytes();
-
-        println!("Expected hash: {}", hex::encode(expected_hash));
-
-        let mut bytes = blake3_push_message_script_with_limb(&message, limb_len)
-            .compile()
-            .to_bytes();
-        let optimized =
-            optimizer::optimize(blake3_compute_script_with_limb(message.len(), limb_len).compile());
-        bytes.extend(optimized.to_bytes());
-        bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
-        let script = ScriptBuf::from_bytes(bytes);
-        //let script_asm = script.to_asm_string();
-
-        // Print the script ASM for debugging
-        //println!("Blake3 script ASM: {}", script_asm);
-
-        //let result = execute_script_buf_without_stack_limit(script);
-        let result = execute_script_buf(script);
-
-        println!("Result: {:?}", result);
     }
 }
