@@ -90,6 +90,7 @@ pub fn script_f2() -> ScriptBuf {
 /// Assumes the stack top contains the 64 limbs (nibbles) of the computed hash.
 /// Pops the 64 limbs and compares them with the provided `expected_output`.
 /// Leaves OP_TRUE (0x01) if verification succeeds.
+#[allow(dead_code)]
 pub fn blake3_verify_output_script(expected_output: [u8; 32]) -> ScriptBuf {
     script! {
         // Push the expected hash bytes (converted to limbs/nibbles)
@@ -115,6 +116,7 @@ pub fn blake3_verify_output_script(expected_output: [u8; 32]) -> ScriptBuf {
 /// Generates a script that verifies a signature against a public key.
 /// Assumes the stack has: <signature> <pubkey>
 /// Leaves 0x01 on stack if verification succeeds, fails otherwise.
+#[allow(dead_code)]
 pub fn script_check_signature() -> ScriptBuf {
     script! {
         OP_CHECKSIG
@@ -125,7 +127,8 @@ pub fn script_check_signature() -> ScriptBuf {
 /// Generates a Bitcoin script to check H(x,r)|B = d
 /// This is the flow selection mechanism from the ColliderVM paper
 /// Returns a script that checks if the first B bits of H(x,r) match d
-pub fn script_check_hash_prefix(flow_id: u32, b_bits: usize) -> ScriptBuf {
+#[allow(dead_code)]
+pub fn script_check_hash_prefix(flow_id: u32, _b_bits: usize) -> ScriptBuf {
     // In a real implementation, this would check if the first b_bits of H(x,r) equal flow_id
     // For simplicity in our toy implementation, we'll just do a direct comparison
     // assuming x and r are on the stack
@@ -150,7 +153,7 @@ pub fn script_check_hash_prefix(flow_id: u32, b_bits: usize) -> ScriptBuf {
 pub fn script_f1_with_signature(
     signer_pubkey: &PublicKey,
     flow_id: u32,
-    b_bits: usize,
+    _b_bits: usize,
 ) -> ScriptBuf {
     let signer_pubkey_bytes = signer_pubkey.to_bytes();
 
@@ -183,7 +186,7 @@ pub fn script_f1_with_signature(
 pub fn script_f2_with_signature(
     signer_pubkey: &PublicKey,
     flow_id: u32,
-    b_bits: usize,
+    _b_bits: usize,
 ) -> ScriptBuf {
     let signer_pubkey_bytes = signer_pubkey.to_bytes();
 

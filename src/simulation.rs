@@ -2,25 +2,24 @@ use std::collections::HashMap;
 use std::error::Error;
 
 use bitcoin::{PublicKey, secp256k1::Secp256k1};
-use bitcoin_script_stack::optimizer;
-use bitvm::{
-    execute_script_buf,
-    hash::blake3::{blake3_compute_script_with_limb, blake3_push_message_script_with_limb},
-};
+use bitvm::execute_script_buf;
 
 use crate::collidervm_toy::{
-    ColliderVmConfig, F1_THRESHOLD, F2_THRESHOLD, OperatorInfo, SignerInfo,
-    blake3_verify_output_script, calculate_blake3_hash, calculate_flow_id, find_valid_nonce,
-    script_f1, script_f1_with_signature, script_f2, script_f2_with_signature,
+    ColliderVmConfig, F1_THRESHOLD, F2_THRESHOLD, OperatorInfo, SignerInfo, calculate_blake3_hash,
+    calculate_flow_id, find_valid_nonce, script_f1, script_f1_with_signature, script_f2,
+    script_f2_with_signature,
 };
 
 // --- Simulation Structures ---
 
 /// Represents a presigned transaction flow
-struct PresignedFlow {
-    flow_id: u32,
-    f1_script: bitcoin::blockdata::script::ScriptBuf,
-    f2_script: bitcoin::blockdata::script::ScriptBuf,
+#[derive(Debug)]
+pub struct PresignedFlow {
+    pub flow_id: u32,
+    #[allow(dead_code)]
+    pub f1_script: bitcoin::blockdata::script::ScriptBuf,
+    #[allow(dead_code)]
+    pub f2_script: bitcoin::blockdata::script::ScriptBuf,
 }
 
 pub struct SimulationResult {
@@ -30,20 +29,18 @@ pub struct SimulationResult {
     pub message: String,
 }
 
+// Create a type alias to simplify the return type of offline_setup
+type SetupResult = (
+    Vec<SignerInfo>,
+    Vec<OperatorInfo>,
+    HashMap<u32, PresignedFlow>,
+);
+
 // --- Simulation Logic ---
 
 /// Simulates the offline setup phase of ColliderVM
 /// Generates n signers and m operators with keypairs and presigns transaction flows
-pub fn offline_setup(
-    config: &ColliderVmConfig,
-) -> Result<
-    (
-        Vec<SignerInfo>,
-        Vec<OperatorInfo>,
-        HashMap<u32, PresignedFlow>,
-    ),
-    Box<dyn Error>,
-> {
+pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn Error>> {
     println!("--- Offline Setup Phase ---");
     println!(
         "Generating {} signers and {} operators...",
@@ -133,7 +130,7 @@ pub fn offline_setup(
 /// Executes the online phase of ColliderVM with a given input value
 /// Returns the simulation result with success/failure status
 pub fn online_execution(
-    signers: &[SignerInfo],
+    _signers: &[SignerInfo],
     operators: &[OperatorInfo],
     presigned_flows: &HashMap<u32, PresignedFlow>,
     config: &ColliderVmConfig,
@@ -167,11 +164,11 @@ pub fn online_execution(
     println!("Using presigned flow with ID: {}", flow.flow_id);
 
     // The limb length for Blake3 hash computation
-    let limb_len = 4;
+    let _limb_len = 4;
 
     // Compute the expected hash in advance for verification
     let full_hash = calculate_blake3_hash(&x_bytes);
-    println!("Blake3 hash of input: {}", hex::encode(&full_hash));
+    println!("Blake3 hash of input: {}", hex::encode(full_hash));
 
     // Results tracking
     let mut f1_result = false;
@@ -179,7 +176,7 @@ pub fn online_execution(
 
     // For toy simulation, we'll create dummy signatures
     // In a real implementation, these would be actual signatures created by the operator
-    let dummy_sig = vec![0u8; 64]; // Dummy signature for simulation
+    let _dummy_sig = [0u8; 64]; // Dummy signature for simulation
 
     // ---- Execute F1 with signature check (Flow 1) ----
     println!(
