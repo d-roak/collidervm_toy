@@ -1,9 +1,6 @@
 use std::error::Error;
 
-use bitcoin::{
-    PublicKey,
-    secp256k1::{self, Secp256k1},
-};
+use bitcoin::{PublicKey, secp256k1::Secp256k1};
 use bitcoin_script_stack::optimizer;
 use bitvm::{
     execute_script_buf,
@@ -19,8 +16,8 @@ use crate::collidervm_toy::{
 
 pub struct SimulationResult {
     pub success: bool,
-    pub f1_result: bool,
-    pub f2_result: bool,
+    pub _f1_result: bool,
+    pub _f2_result: bool,
     pub message: String,
 }
 
@@ -43,10 +40,11 @@ pub fn offline_setup(
 
     // Generate signers
     for i in 0..config.n {
-        let (_privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
+        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let signer = SignerInfo {
-            id: i,
+            _id: i,
             pubkey: PublicKey::new(pubkey),
+            _privkey: privkey,
         };
         println!("Generated Signer {}: {}", i, signer.pubkey);
         signers.push(signer);
@@ -54,10 +52,11 @@ pub fn offline_setup(
 
     // Generate operators
     for i in 0..config.m {
-        let (_privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
+        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let operator = OperatorInfo {
-            id: i,
+            _id: i,
             pubkey: PublicKey::new(pubkey),
+            _privkey: privkey,
         };
         println!("Generated Operator {}: {}", i, operator.pubkey);
         operators.push(operator);
@@ -185,8 +184,8 @@ pub fn online_execution(
     // Create and return the simulation result
     let result = SimulationResult {
         success,
-        f1_result,
-        f2_result,
+        _f1_result: f1_result,
+        _f2_result: f2_result,
         message: if success {
             format!(
                 "Successfully verified input {} satisfies all conditions",

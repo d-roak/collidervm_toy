@@ -1,7 +1,4 @@
-use bitcoin::{
-    PublicKey,
-    blockdata::{opcodes::all::*, script::ScriptBuf},
-};
+use bitcoin::{PublicKey, blockdata::script::ScriptBuf};
 use bitvm::{bigint::U256, treepp::script};
 use blake3::Hasher;
 
@@ -16,22 +13,22 @@ pub struct ColliderVmConfig {
 }
 
 // --- Data Types ---
-pub type InputX = Vec<u8>;
-pub type NonceR = Vec<u8>;
+pub type _InputX = Vec<u8>;
+pub type _NonceR = Vec<u8>;
 
 // --- Actors ---
 #[derive(Debug)]
 pub struct SignerInfo {
-    pub id: usize,
+    pub _id: usize,
     pub pubkey: PublicKey,
-    // In a real scenario, the signer would hold the secp256k1::SecretKey
+    pub _privkey: secp256k1::SecretKey,
 }
 
 #[derive(Debug)]
 pub struct OperatorInfo {
-    pub id: usize,
+    pub _id: usize,
     pub pubkey: PublicKey,
-    // In a real scenario, the operator would hold the secp256k1::SecretKey
+    pub _privkey: secp256k1::SecretKey,
 }
 
 // --- Toy Function Constants ---
@@ -47,7 +44,7 @@ pub fn calculate_blake3_hash(data: &[u8]) -> [u8; 32] {
 }
 
 /// Alternate implementation that returns first 4 bytes as u32 (used for debugging)
-pub fn collider_hash_blake3(x_bytes: &[u8]) -> u32 {
+pub fn _collider_hash_blake3(x_bytes: &[u8]) -> u32 {
     if x_bytes.len() != 4 {
         eprintln!(
             "ERROR: collider_hash_blake3 expects 4 bytes, got {}",
