@@ -172,224 +172,120 @@ fn _find_b_pair_simplified_exact(
 
 // --- Main Simulation ---
 fn run_mvp_simulation() -> Result<(), Box<dyn Error>> {
-    println!("--- ColliderVM MVP Simulation with Real Blake3 ---");
+    println!("--- ColliderVM Toy Simulation ---");
 
-    // 1. Configuration
+    // Configuration
     let config = ColliderVmConfig { l: 4, b: 8, k: 2 }; // B=8 bits
     println!("Config: L={}, B={}, k={}", config.l, config.b, config.k);
 
-    // 2. Setup Signer
+    // Setup Signer
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let (_privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
     let signer_pubkey = bitcoin::PublicKey::new(pubkey);
     println!("Signer PubKey: {}", signer_pubkey);
 
-    // 3. Set Expected Input Value
+    // Set Expected Input Value
     let expected_x = 114u32;
     let x_bytes = expected_x.to_le_bytes().to_vec(); // [0x72, 0x00, 0x00, 0x00]
-
-    // Calculate Blake3 hash for verification
-    let blake3_hash_u32 = collider_hash_blake3(&x_bytes); // 0x7D9FAAB7 u32
-    println!(
-        "Input x={} has Blake3 hash: {} (0x{:X})",
-        expected_x, blake3_hash_u32, blake3_hash_u32
-    );
 
     // Not using these directly anymore, prefix with underscore to silence warnings
     let _f1_script = script_f1();
     let _f2_script = script_f2();
 
-    // 5. Following the successful test pattern with Blake3
     let limb_len = 4;
 
-    // ---- Blake3 Only Test ----
-    // Similar to the working test, prepare a single script by combining components
-    println!("\n--- Execution Results ---");
-    println!("\nExecuting Blake3 Hash Computation...");
-
-    // Compute the expected hash
+    // Compute the expected hash once
     let full_hash = blake3::hash(&x_bytes).as_bytes().to_owned();
-
-    // Convert full_hash to a fixed [u8; 32] array for the verify function
     let expected_hash: [u8; 32] = full_hash[0..32].try_into().unwrap();
 
-    // Build the script in bytes
-    let mut blake3_script_bytes = blake3_push_message_script_with_limb(&x_bytes, limb_len)
+    println!("\n--- Execution Results ---");
+
+    // ---- Script 1 (Blake3 + F1) Test ----
+    println!("\nExecuting Script 1 (Blake3 + F1)...");
+
+    // Build the full script with Blake3 hash verification and F1 check
+    let mut script1_bytes = blake3_push_message_script_with_limb(&x_bytes, limb_len)
         .compile()
         .to_bytes();
 
-    // Use optimizer for the compute script as done in the test
-    let optimized =
+    let optimized1 =
         optimizer::optimize(blake3_compute_script_with_limb(x_bytes.len(), limb_len).compile());
-    blake3_script_bytes.extend(optimized.to_bytes());
+    script1_bytes.extend(optimized1.to_bytes());
 
-    // Add verification bytes
-    blake3_script_bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
+    // Add verification
+    script1_bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
 
-    // Create final script and execute
-    let blake3_script = ScriptBuf::from_bytes(blake3_script_bytes);
-    let exec_result_blake3 = execute_script_buf(blake3_script);
-
-    if exec_result_blake3.success {
-        println!("Blake3 Hash Computation Succeeded and verified!");
-        println!("Result: {:?}", exec_result_blake3);
-    } else {
-        println!("Blake3 Hash Computation FAILED!");
-        println!("Error details: {:?}", exec_result_blake3);
-    }
-
-    // ---- Script 1 (F1) Test ----
-    println!("\nExecuting Script 1 (Blake3 + F1)...");
-
-    // Let's create a simpler test for F1 operation to isolate the issue
-    let simple_f1_script = script! {
-        // Push input 114 as a minimal integer
-        <114i64>
-
-        // Push threshold 100 as a minimal integer
-        <100i64>
-
-        // Check 114 > 100
-        OP_GREATERTHAN
-        OP_VERIFY
-        OP_TRUE
-    }
-    .compile();
-
-    // First try the simple F1 test
-    let simple_f1_result = execute_script_buf(simple_f1_script);
-
-    if simple_f1_result.success {
-        println!("Simple F1 test passed!");
-
-        // Now build the full script with Blake3 hash verification
-        let mut script1_bytes = blake3_push_message_script_with_limb(&x_bytes, limb_len)
-            .compile()
-            .to_bytes();
-
-        let optimized1 =
-            optimizer::optimize(blake3_compute_script_with_limb(x_bytes.len(), limb_len).compile());
-        script1_bytes.extend(optimized1.to_bytes());
-
-        // Add verification
-        script1_bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
-
-        // Add F1 script, reusing the approach from the working test
-        // Drop the 0x01 from Blake3 verification and leave only F1 result on stack
-        script1_bytes.extend(
-            script! {
-                // Remove the 0x01 from Blake3 verification
-                OP_DROP
-
-                // Push input as a minimal integer to avoid MinimalData issues
-                <114i64>
-
-                // Push threshold as a minimal integer
-                <100i64>
-
-                // Now check x > F1_THRESHOLD
-                OP_GREATERTHAN
-            }
-            .compile()
-            .to_bytes(),
-        );
-
-        let script1 = ScriptBuf::from_bytes(script1_bytes);
-        let exec_result_1 = execute_script_buf(script1);
-
-        if exec_result_1.success {
-            println!("Script 1 (Blake3 + F1) Execution Succeeded!");
-            println!("Result: {:?}", exec_result_1);
-        } else {
-            println!("Script 1 (Blake3 + F1) Execution FAILED!");
-            println!("Error details: {:?}", exec_result_1);
+    // Add F1 script
+    script1_bytes.extend(
+        script! {
+            OP_DROP // Remove the 0x01 from Blake3 verification
+            <114i64> // Push input as minimal integer
+            <100i64> // Push threshold as minimal integer
+            OP_GREATERTHAN // Leaves 0x01 if true
         }
+        .compile()
+        .to_bytes(),
+    );
+
+    let script1 = ScriptBuf::from_bytes(script1_bytes);
+    let exec_result_1 = execute_script_buf(script1);
+
+    if exec_result_1.success {
+        println!("Script 1 (Blake3 + F1) Execution Succeeded!");
+        println!("Result: {:?}", exec_result_1);
     } else {
-        println!("Simple F1 test FAILED! Error details: {}", simple_f1_result);
+        println!("Script 1 (Blake3 + F1) Execution FAILED!");
+        println!("Error details: {:?}", exec_result_1);
     }
 
     // ---- Script 2 (F2) Test ----
     println!("\nExecuting Script 2 (Blake3 + F2)...");
 
-    // Simple test for F2
-    let simple_f2_script = script! {
-        // Push input 114 as a minimal integer
-        <114i64>
+    // Build the full script with Blake3 hash verification and F2 check
+    let mut script2_bytes = blake3_push_message_script_with_limb(&x_bytes, limb_len)
+        .compile()
+        .to_bytes();
 
-        // Push threshold 200 as a minimal integer
-        <200i64>
+    let optimized2 =
+        optimizer::optimize(blake3_compute_script_with_limb(x_bytes.len(), limb_len).compile());
+    script2_bytes.extend(optimized2.to_bytes());
 
-        // Check 114 < 200
-        OP_LESSTHAN
-        OP_VERIFY
-        OP_TRUE
-    }
-    .compile();
+    // Add verification
+    script2_bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
 
-    // First try the simple F2 test
-    let simple_f2_result = execute_script_buf(simple_f2_script);
-
-    if simple_f2_result.success {
-        println!("Simple F2 test passed!");
-
-        // Build the full script with Blake3 hash verification
-        let mut script2_bytes = blake3_push_message_script_with_limb(&x_bytes, limb_len)
-            .compile()
-            .to_bytes();
-
-        let optimized2 =
-            optimizer::optimize(blake3_compute_script_with_limb(x_bytes.len(), limb_len).compile());
-        script2_bytes.extend(optimized2.to_bytes());
-
-        // Add verification
-        script2_bytes.extend(blake3_verify_output_script(expected_hash).to_bytes());
-
-        // Add F2 script, reusing the approach from the simple test
-        // Drop the 0x01 from Blake3 verification and leave only F2 result on stack
-        script2_bytes.extend(
-            script! {
-                // Remove the 0x01 from Blake3 verification
-                OP_DROP
-
-                // Push input as a minimal integer
-                <114i64>
-
-                // Push threshold as a minimal integer
-                <200i64>
-
-                // Now check x < F2_THRESHOLD
-                OP_LESSTHAN
-            }
-            .compile()
-            .to_bytes(),
-        );
-
-        let script2 = ScriptBuf::from_bytes(script2_bytes);
-        let exec_result_2 = execute_script_buf(script2);
-
-        if exec_result_2.success {
-            println!("Script 2 (Blake3 + F2) Execution Succeeded!");
-            println!("Result: {:?}", exec_result_2);
-        } else {
-            println!("Script 2 (Blake3 + F2) Execution FAILED!");
-            println!("Error details: {:?}", exec_result_2);
+    // Add F2 script
+    script2_bytes.extend(
+        script! {
+            OP_DROP // Remove the 0x01 from Blake3 verification
+            <114i64> // Push input as minimal integer
+            <200i64> // Push threshold as minimal integer
+            OP_LESSTHAN // Leaves 0x01 if true
         }
+        .compile()
+        .to_bytes(),
+    );
+
+    let script2 = ScriptBuf::from_bytes(script2_bytes);
+    let exec_result_2 = execute_script_buf(script2);
+
+    if exec_result_2.success {
+        println!("Script 2 (Blake3 + F2) Execution Succeeded!");
+        println!("Result: {:?}", exec_result_2);
     } else {
-        println!("Simple F2 test FAILED! Error details: {}", simple_f2_result);
+        println!("Script 2 (Blake3 + F2) Execution FAILED!");
+        println!("Error details: {:?}", exec_result_2);
     }
 
     println!("\n--- Simulation Complete ---");
-    println!("Great success! We have successfully verified:");
-    println!("1. The Blake3 hash of input x=114 matches the expected hash");
-    println!("2. The input value x=114 is greater than 100 (F1 constraint)");
-    println!("3. The input value x=114 is less than 200 (F2 constraint)");
+    println!("Successfully verified:");
+    println!("1. Script 1 (Blake3 + F1) executed successfully.");
+    println!("2. Script 2 (Blake3 + F2) executed successfully.");
 
     Ok(())
 }
 
-// Return ScriptBuf
 fn script_f1() -> ScriptBuf {
-    script! { // Use bitcoin_script::script!
+    script! {
         <F1_THRESHOLD>
         OP_GREATERTHAN
         OP_VERIFY
@@ -397,7 +293,6 @@ fn script_f1() -> ScriptBuf {
     .compile()
 }
 
-// Return ScriptBuf
 fn script_f2() -> ScriptBuf {
     script! { // Use bitcoin_script::script!
         <F2_THRESHOLD>
