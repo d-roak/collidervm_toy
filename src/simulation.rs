@@ -1,4 +1,5 @@
-use std::{collections::HashMap, error::Error};
+use colored::*;
+use std::{collections::HashMap, error::Error, thread, time::Duration}; // Import colored crate
 
 use bitcoin::{
     Amount, OutPoint, PublicKey, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
@@ -93,11 +94,19 @@ fn create_placeholder_tx(
 /// * `Ok(SetupResult)` - A tuple containing the generated signers, operators, and the map of presigned flows.
 /// * `Err(Box<dyn Error>)` - An error if setup fails (e.g., key generation).
 pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn Error>> {
-    println!("--- Offline Setup Phase ---");
+    println!("\n{}", "---  PHASE 1: Offline Setup --- ".bold().yellow());
     println!(
-        "Generating {} signers and {} operators...",
-        config.n, config.m
+        "{}",
+        "(Signers generate keys and presign all transaction flows)".dimmed()
     );
+    thread::sleep(Duration::from_millis(500)); // Small pause
+
+    println!(
+        "\nGenerating {} signers and {} operators...",
+        config.n.to_string().cyan(),
+        config.m.to_string().cyan()
+    );
+    thread::sleep(Duration::from_millis(200));
 
     // Initialize Secp256k1 context for key operations
     let secp = Secp256k1::new();
@@ -105,6 +114,7 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
     let mut operators = Vec::with_capacity(config.m);
 
     // 1. Generate Signer Info
+    println!("Generating Signer keys...");
     for i in 0..config.n {
         let (privkey, secp_pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let keypair = Keypair::from_secret_key(&secp, &privkey);
@@ -116,11 +126,18 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
             keypair,
             xonly,
         };
-        println!("  Generated Signer {}: {}", i, signer.pubkey);
+        println!(
+            "  {} {}: {}",
+            "Generated Signer".dimmed(),
+            i,
+            signer.pubkey.to_string().green()
+        );
         signers.push(signer);
+        thread::sleep(Duration::from_millis(50)); // Tiny pause per key
     }
 
     // 1. Generate Operator Info
+    println!("\nGenerating Operator keys...");
     for i in 0..config.m {
         let (privkey, secp_pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let operator = OperatorInfo {
@@ -128,21 +145,35 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
             pubkey: PublicKey::new(secp_pubkey),
             privkey, // Store private key for simulation
         };
-        println!("  Generated Operator {}: {}", i, operator.pubkey);
+        println!(
+            "  {} {}: {}",
+            "Generated Operator".dimmed(),
+            i,
+            operator.pubkey.to_string().blue()
+        );
         operators.push(operator);
+        thread::sleep(Duration::from_millis(50)); // Tiny pause per key
     }
 
-    println!("\nGenerating presigned flows (Transaction Templates + Signatures)...");
+    println!(
+        "\n{} {} flows (Transaction Templates + Signatures)...",
+        "Generating".yellow(),
+        (1u64 << config.l).to_string().cyan()
+    );
+    thread::sleep(Duration::from_millis(300));
     // Calculate the number of flows (|D| = 2^L), limited for the toy example.
     let num_flows = std::cmp::min(1u64 << config.l, 16u64) as u32;
     println!(
-        "  Targeting {} flows (L={}, max 16 for toy)",
-        num_flows, config.l
+        "  {}",
+        format!(
+            "(Targeting {} flows for this demo, L={}, max 16)",
+            num_flows, config.l
+        )
+        .dimmed()
     );
     let mut presigned_flows_map: HashMap<u32, PresignedFlow> = HashMap::new();
 
     // Define a dummy funding transaction output (needed for F1's input)
-    // In a real system, this would be the actual UTXO being spent.
     const DUMMY_TXID_STR: &str = "5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456";
     let funding_txid = DUMMY_TXID_STR
         .parse::<Txid>()
@@ -155,7 +186,6 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
         let mut steps = Vec::with_capacity(config.k); // k=2 for F1, F2
 
         // --- Presign Step F1 ---
-        // 2a. Create F1 locking script and placeholder transaction
         let script_f1 = build_script_f1_locked(&signers[0].pubkey, flow_id, config.b);
         let tx_f1_template = create_placeholder_tx(
             script_f1.clone(),
@@ -163,41 +193,33 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
             funding_txid,
             funding_vout,
         );
-        // 2b. Generate simplified sighash message for F1
         let sighash_msg_f1 = create_toy_sighash_message(&script_f1, tx_f1_template.output[0].value);
         let mut signatures_f1 = HashMap::new();
-        // 2c. Collect signatures from all signers for F1
         for signer in &signers {
             let signature = secp.sign_schnorr(&sighash_msg_f1, &signer.keypair);
             signatures_f1.insert(signer.pubkey.to_bytes(), signature);
         }
-        // 2d. Store F1 step details
         steps.push(PresignedStep {
-            tx_template: tx_f1_template.clone(), // Clone the template
+            tx_template: tx_f1_template.clone(),
             sighash_message: sighash_msg_f1,
             signatures: signatures_f1,
             locking_script: script_f1,
         });
 
         // --- Presign Step F2 ---
-        // 2a. Create F2 locking script and placeholder transaction
-        // F2 spends the output of F1
         let script_f2 = build_script_f2_locked(&signers[0].pubkey, flow_id, config.b);
         let tx_f2_template = create_placeholder_tx(
             script_f2.clone(),
-            funding_amount, // Assume value is preserved (simplification)
-            tx_f1_template.compute_txid(), // Input is F1's output
-            0,              // Assuming F1 has only one output
+            funding_amount,
+            tx_f1_template.compute_txid(),
+            0,
         );
-        // 2b. Generate simplified sighash message for F2
         let sighash_msg_f2 = create_toy_sighash_message(&script_f2, tx_f2_template.output[0].value);
         let mut signatures_f2 = HashMap::new();
-        // 2c. Collect signatures from all signers for F2
         for signer in &signers {
             let signature = secp.sign_schnorr(&sighash_msg_f2, &signer.keypair);
             signatures_f2.insert(signer.pubkey.to_bytes(), signature);
         }
-        // 2d. Store F2 step details
         steps.push(PresignedStep {
             tx_template: tx_f2_template,
             sighash_message: sighash_msg_f2,
@@ -205,25 +227,30 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
             locking_script: script_f2,
         });
 
-        // Add the complete PresignedFlow (F1 + F2) to the map
-        presigned_flows_map.insert(
-            flow_id,
-            PresignedFlow {
-                flow_id, // The flow ID `d`
-                steps,   // The sequence [F1_step, F2_step]
-            },
-        );
+        presigned_flows_map.insert(flow_id, PresignedFlow { flow_id, steps });
 
         // Progress indicator
-        if flow_id % 4 == 3 || flow_id == num_flows - 1 {
-            println!("  Created and presigned flow {}...", flow_id);
+        if flow_id % (num_flows / 4).max(1) == (num_flows / 4).max(1) - 1
+            || flow_id == num_flows - 1
+        {
+            println!(
+                "  {} flow d={}...",
+                "Created and presigned".dimmed(),
+                flow_id
+            );
+            thread::sleep(Duration::from_millis(100));
         }
     }
 
     println!(
-        "Offline setup complete. {} flows presigned by {} signers.\n",
-        presigned_flows_map.len(),
-        config.n
+        "\n{} {} flows presigned by {} signers.",
+        "Offline setup complete.".bold().green(),
+        presigned_flows_map.len().to_string().cyan(),
+        config.n.to_string().cyan()
+    );
+    println!(
+        "{}",
+        "-----------------------------------------------------".yellow()
     );
     Ok((signers, operators, presigned_flows_map))
 }
@@ -258,162 +285,218 @@ pub fn online_execution(
     config: &ColliderVmConfig,
     input_value: u32,
 ) -> Result<SimulationResult, Box<dyn Error>> {
-    println!("--- Online Execution Phase ---");
+    println!("\n{}", "--- PHASE 2: Online Execution --- ".bold().yellow());
     println!(
-        "Config: L={}, B={}, k={}, n={}, m={}",
-        config.l, config.b, config.k, config.n, config.m
+        "{}",
+        "(Operator finds nonce, selects flow, executes scripts)".dimmed()
     );
-    println!("Input value (x): {}", input_value);
+    thread::sleep(Duration::from_millis(500));
+
+    println!("\nConfiguration:");
+    println!(
+        "  L={}, B={}, k={}, n={}, m={}",
+        config.l.to_string().cyan(),
+        config.b.to_string().cyan(),
+        config.k.to_string().cyan(),
+        config.n.to_string().cyan(),
+        config.m.to_string().cyan()
+    );
+    println!("Input value (x): {}", input_value.to_string().cyan());
+    thread::sleep(Duration::from_millis(300));
+
     // 1. Operator finds a valid nonce `r` and corresponding flow ID `d`
+    println!(
+        "\n{}: Finding Nonce (r) and Flow ID (d) for input x={}...",
+        "Operator Action".bold().blue(),
+        input_value
+    );
     let (nonce, flow_id) = match find_valid_nonce(input_value, config.b, config.l) {
         Ok(result) => result,
         Err(e) => {
-            // Propagate the error if nonce finding fails
             return Err(format!("Failed to find a valid nonce: {}", e).into());
         }
     };
     println!(
-        "Operator found Nonce (r): {}, required Flow ID (d): {}",
-        nonce, flow_id
+        "  {} Nonce (r): {}, Required Flow ID (d): {}",
+        "Found!".bold().green(),
+        nonce.to_string().cyan(),
+        flow_id.to_string().cyan()
     );
+    thread::sleep(Duration::from_millis(300));
 
     // 2. Retrieve the PresignedFlow for the calculated flow ID `d`
+    println!(
+        "\n{}: Retrieving presigned flow d={}...",
+        "Operator Action".bold().blue(),
+        flow_id
+    );
     let presigned_flow = presigned_flows_map.get(&flow_id).ok_or_else(|| {
-        // This should ideally not happen if nonce finding guarantees a valid flow ID
-
         format!(
             "Critical Error: Presigned flow d={} not found after nonce search!",
             flow_id
         )
     })?;
-    println!("Retrieved presigned flow d={}", flow_id);
+    println!(
+        "  {} Retrieved presigned flow d={}",
+        "Success:".green(),
+        flow_id
+    );
+    thread::sleep(Duration::from_millis(300));
 
     // --- Perform Off-Chain Checks (Informational Only) ---
-    // These checks verify signatures and hash calculations using Rust code,
-    // mimicking what the Bitcoin script aims to achieve on-chain.
+    println!(
+        "\n{}",
+        "--- Off-Chain Check Results (Informational) ---".dimmed()
+    );
     let secp = Secp256k1::verification_only();
     let signer0_pubkey = &signers[0].pubkey;
     let signer0_xonly = &signers[0].xonly;
-
-    // Off-chain check of Signer 0's signature for F1
     let step_f1 = &presigned_flow.steps[0];
-    let signature_f1 = step_f1
-        .signatures
-        .get(&signer0_pubkey.to_bytes())
-        .ok_or("Signature from signer 0 not found for F1 step")?;
+    let signature_f1 = step_f1.signatures.get(&signer0_pubkey.to_bytes()).unwrap(); // Assume exists
     let offchain_sig_f1_valid = secp
         .verify_schnorr(signature_f1, &step_f1.sighash_message, signer0_xonly)
         .is_ok();
-
-    // Off-chain check of Signer 0's signature for F2
     let step_f2 = &presigned_flow.steps[1];
-    let signature_f2 = step_f2
-        .signatures
-        .get(&signer0_pubkey.to_bytes())
-        .ok_or("Signature from signer 0 not found for F2 step")?;
+    let signature_f2 = step_f2.signatures.get(&signer0_pubkey.to_bytes()).unwrap(); // Assume exists
     let offchain_sig_f2_valid = secp
         .verify_schnorr(signature_f2, &step_f2.sighash_message, signer0_xonly)
         .is_ok();
-
-    // Off-chain check of the hash prefix calculation H(x, r)|_B = d
     let offchain_hash_prefix_valid =
         calculate_flow_id(input_value, nonce, config.b, config.l) == Ok(flow_id);
-
-    println!("\n--- Off-Chain Check Results (Informational) ---");
-    println!("  Signature F1 Valid (Signer 0): {}", offchain_sig_f1_valid);
-    println!("  Signature F2 Valid (Signer 0): {}", offchain_sig_f2_valid);
     println!(
-        "  Hash Prefix Valid (H(x,r)|_B == d): {}",
-        offchain_hash_prefix_valid
+        "  {} F1 Signature Valid (Signer 0): {}",
+        "Check:".dimmed(),
+        offchain_sig_f1_valid
+            .to_string()
+            .color(if offchain_sig_f1_valid {
+                Color::Green
+            } else {
+                Color::Red
+            })
     );
-    println!("---------------------------------------------");
+    println!(
+        "  {} F2 Signature Valid (Signer 0): {}",
+        "Check:".dimmed(),
+        offchain_sig_f2_valid
+            .to_string()
+            .color(if offchain_sig_f2_valid {
+                Color::Green
+            } else {
+                Color::Red
+            })
+    );
+    println!(
+        "  {} Hash Prefix Valid (H(x,r)|_B == d): {}",
+        "Check:".dimmed(),
+        offchain_hash_prefix_valid
+            .to_string()
+            .color(if offchain_hash_prefix_valid {
+                Color::Green
+            } else {
+                Color::Red
+            })
+    );
+    println!(
+        "{}",
+        "---------------------------------------------".dimmed()
+    );
+    thread::sleep(Duration::from_millis(500));
 
     // --- Construct and Execute Full Script for Step F1 ---
-    println!("\nExecuting Full Script Step F1 (Flow d={})...", flow_id);
+    println!(
+        "\n{}: Executing Full Script Step F1 (Flow d={})...",
+        "Operator Action".bold().blue(),
+        flow_id
+    );
+    thread::sleep(Duration::from_millis(300));
 
-    // Construct the witness for F1 (Simplified): <signature> <flow_id> <input_x>
     let witness_script_f1 = {
         let mut builder = Builder::new();
-        // Push Signer 0's signature
-        let sig_bytes = PushBytesBuf::try_from(signature_f1.as_ref().to_vec())
-            .expect("Signature F1 is too long for push");
-
+        let sig_bytes =
+            PushBytesBuf::try_from(signature_f1.as_ref().to_vec()).expect("Sig too long");
         builder = builder.push_slice(sig_bytes);
-        // Push the flow ID `d` (which is the hash prefix)
         builder = builder.push_int(flow_id as i64);
-        // Push the input value `x`
         builder = builder.push_int(input_value as i64);
         builder.into_script()
     };
-
-    // Combine witness and locking script
     let mut full_script_bytes_f1 = witness_script_f1.to_bytes();
     full_script_bytes_f1.extend(step_f1.locking_script.to_bytes());
     let full_script_f1 = ScriptBuf::from_bytes(full_script_bytes_f1);
-    println!("Full Script F1: {}", full_script_f1);
+    println!(
+        "  {} Full Script F1: {}",
+        "Info:".dimmed(),
+        full_script_f1.to_asm_string().italic()
+    );
 
-    // Execute F1 script
     let exec_result_f1 = execute_script_buf(full_script_f1.clone());
     let script_f1_success = exec_result_f1.success;
     println!(
-        "  => Full Script F1 Execution Result: {} (Log: {:?})",
+        "    => {}: {} (Log: {:?})",
+        "Execution Result".bold(),
         if script_f1_success {
-            "PASSED ✅"
+            "PASSED ✅".bold().green()
         } else {
-            "FAILED ❌"
+            "FAILED ❌".bold().red()
         },
         exec_result_f1
     );
     if !script_f1_success {
         println!(
-            "     (Toy Note: Failure might be due to OP_CHECKSIGVERIFY; script logic might still be correct)"
+            "       {}",
+            "(Toy Note: Failure might be due to OP_CHECKSIGVERIFY)".dimmed()
         );
     }
+    thread::sleep(Duration::from_millis(500));
 
     // --- Construct and Execute Full Script for Step F2 ---
-    println!("\nExecuting Full Script Step F2 (Flow d={})...", flow_id);
+    println!(
+        "\n{}: Executing Full Script Step F2 (Flow d={})...",
+        "Operator Action".bold().blue(),
+        flow_id
+    );
+    thread::sleep(Duration::from_millis(300));
 
-    // Construct the witness for F2 (Simplified): <signature> <flow_id> <input_x>
     let witness_script_f2 = {
         let mut builder = Builder::new();
-        // Push Signer 0's signature
-        let sig_bytes = PushBytesBuf::try_from(signature_f2.as_ref().to_vec())
-            .expect("Signature F2 is too long for push");
+        let sig_bytes =
+            PushBytesBuf::try_from(signature_f2.as_ref().to_vec()).expect("Sig too long");
         builder = builder.push_slice(sig_bytes);
-        // Push the flow ID `d`
         builder = builder.push_int(flow_id as i64);
-        // Push the input value `x`
         builder = builder.push_int(input_value as i64);
         builder.into_script()
     };
-
-    // Combine witness and locking script
     let mut full_script_bytes_f2 = witness_script_f2.to_bytes();
     full_script_bytes_f2.extend(step_f2.locking_script.to_bytes());
     let full_script_f2 = ScriptBuf::from_bytes(full_script_bytes_f2);
-    println!("Full Script F2: {}", full_script_f2);
+    println!(
+        "  {} Full Script F2: {}",
+        "Info:".dimmed(),
+        full_script_f2.to_asm_string().italic()
+    );
 
-    // Execute F2 script
     let exec_result_f2 = execute_script_buf(full_script_f2.clone());
     let script_f2_success = exec_result_f2.success;
     println!(
-        "  => Full Script F2 Execution Result: {} (Log: {:?})",
+        "    => {}: {} (Log: {:?})",
+        "Execution Result".bold(),
         if script_f2_success {
-            "PASSED ✅"
+            "PASSED ✅".bold().green()
         } else {
-            "FAILED ❌"
+            "FAILED ❌".bold().red()
         },
         exec_result_f2
     );
     if !script_f2_success {
         println!(
-            "     (Toy Note: Failure might be due to OP_CHECKSIGVERIFY; script logic might still be correct)"
+            "       {}",
+            "(Toy Note: Failure might be due to OP_CHECKSIGVERIFY)".dimmed()
         );
     }
+    thread::sleep(Duration::from_millis(500));
 
     // Determine Overall Simulation Success
     let overall_success = script_f1_success && script_f2_success;
-    println!("\n--- Execution Complete ---");
+    println!("\n{}", "--- Online Execution Complete ---".yellow());
 
     // Create the final simulation result message
     let result_message = if overall_success {
@@ -450,16 +533,14 @@ pub fn run_simulation(
     input_value: u32,
 ) -> Result<SimulationResult, Box<dyn Error>> {
     // --- Phase 1: Offline Setup ---
-    // Signers generate keys and presign all transaction flows.
     let (signers, operators, presigned_flows) = offline_setup(&config)?;
 
     // --- Phase 2: Online Execution ---
-    // An operator takes an input, finds a nonce, selects a flow, and executes the scripts.
     let result = online_execution(&signers, &operators, &presigned_flows, &config, input_value)?;
 
-    // --- Phase 3: Report Results ---
-    println!("\n--- Simulation Summary ---");
-    println!("{}", result.message);
+    // --- Phase 3: Report Summary (in main.rs) ---
+    // println!("\n--- Simulation Summary ---"); // Moved to main.rs
+    // println!("{}", result.message);
 
     Ok(result)
 }
