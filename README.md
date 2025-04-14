@@ -1,172 +1,150 @@
 # ColliderVM Toy Simulation
 
-This project provides a simplified Rust simulation of the concepts presented in the [ColliderVM: Stateful Computation on Bitcoin](https://eprint.iacr.org/2025/591) paper. It aims to demonstrate the core mechanisms of ColliderVM, particularly the use of presigned transaction flows and hash collision challenges for enabling stateful computation on Bitcoin without relying on fraud proofs.
+This project provides a simplified Rust simulation of the concepts presented in the [ColliderVM: Stateful Computation on Bitcoin](https://eprint.iacr.org/2025/591) paper. It demonstrates the core mechanisms of ColliderVM, particularly the use of presigned transaction flows and hash collision challenges for enabling stateful computation on Bitcoin without relying on fraud proofs.
 
-**Disclaimer:** This is a _toy_ simulation and does **not** implement a production ready implementation of the ColliderVM protocol. It simplifies many aspects for clarity and focus on the protocol's structure.
+**Disclaimer:** This is a _toy_ simulation and does **not** implement a production-ready ColliderVM protocol. It simplifies many aspects (like signature verification, sighashing, and transaction structure) for clarity and focuses on the protocol's structural flow and the hash collision mechanism.
 
 ## Background: ColliderVM Core Concepts
 
 The ColliderVM paper proposes a method to achieve stateful computation on Bitcoin, addressing limitations of the Bitcoin script language. Key concepts include:
 
-- **Stateful Computation:** Enabling computations that persist across multiple transactions, comprising:
-  - **Data Persistence:** Accessing/modifying data across transactions.
-  - **Logic Persistence:** Enforcing a specific sequence of computational steps.
+- **Stateful Computation:** Enabling computations (data & logic) to persist across multiple Bitcoin transactions.
 - **Actors:**
-  - **Signers (n):** Responsible for the offline setup, creating and signing transaction templates. Assumes 1-out-of-n are honest for safety.
-  - **Operators (m):** Responsible for online execution, providing inputs, finding nonces, and broadcasting transactions. Assumes 1-out-of-m are honest for liveness.
-- **Presigned Flows:** Signers create multiple (`2^L`) parallel transaction sequences (flows) offline. Each flow corresponds to a unique identifier (`d`) from a predefined set `D`.
-- **Hash Collision Challenge:** To ensure input consistency across steps in a flow, the Operator must find an input `x` and a nonce `r` such that the first `B` bits of a hash `H(x, r)` match a specific flow identifier `d` within the set `D` (`H(x, r)|_B = d ∈ D`).
-- **Computational Gap:** Finding a _single_ valid pair `(x, r)` for _any_ `d ∈ D` requires `~2^(B-L)` hash computations (honest work). Finding _two different pairs_ `(x, r) ≠ (x', r')` that map to the _same_ `d` (cheating) requires significantly more work (`~2^(B-L/2)` for double collision, `~2^(B-L/3)` for triple collision).
-- **Capital Efficiency:** By avoiding fraud proofs, ColliderVM aims to eliminate the capital lock-up period required in systems like BitVM2.
+  - **Signers (n):** Offline setup participants who create and sign transaction templates (flows). Assume 1-of-n are honest for safety (preventing invalid state transitions).
+  - **Operators (m):** Online execution participants who provide inputs, find nonces via hashing, and broadcast transactions. Assume 1-of-m are honest for liveness (ensuring the process can proceed).
+- **Presigned Flows (`D`):** A set of `2^L` pre-agreed, parallel transaction sequences. Each flow corresponds to a unique identifier `d` from the set `D`.
+- **Hash Collision Challenge:** To ensure the _same_ input `x` is used across steps in a chosen flow `d`, the Operator must find a nonce `r` such that the first `B` bits of a hash `H(x, r)` match that specific flow identifier `d` (i.e., `H(x, r)|_B = d ∈ D`).
+- **Computational Gap:**
+  - **Honest Work:** Finding _any_ valid pair `(x, r)` such that `H(x, r)|_B ∈ D` takes `~2^(B-L)` hash computations.
+  - **Malicious Work (Double Collision):** Finding _two different pairs_ `(x, r) ≠ (x', r')` that map to the _same_ flow `d` (i.e., `H(x, r)|_B = H(x', r')|_B = d`) takes significantly more work (`~2^(B-L/2)`), making it computationally expensive to cheat by using different inputs within the same flow.
+- **Capital Efficiency:** A key goal is to avoid the capital lock-up periods associated with fraud-proof-based systems like BitVM2.
 
-## ColliderVM Toy: MVP Design Choices
+## ColliderVM Toy: Design Choices & Simplifications
 
-This simulation implements a minimal viable product (MVP) to showcase the core ColliderVM flow (specifically the "Double Collision Variant" described in the paper):
+This simulation implements a minimal proof-of-concept:
 
-- **Simplified Functions:** Instead of a complex computation like STARK verification, we use two simple subfunctions:
+- **Simple Function (`F`):** Instead of complex logic (like STARK verification), the computation `F(x)` is split into two subfunctions:
   - `F1(x)`: Checks if `input_value > 100`.
   - `F2(x)`: Checks if `input_value < 200`.
-    The overall function `F(x)` succeeds only if `F1(x) AND F2(x)` is true.
-- **Simulated Actors:** We generate `n` signers and `m` operators with `secp256k1` key pairs, representing the actors holding keys.
-- **Simulated Presigning:** We don't create actual Bitcoin transactions. Instead, we generate the _locking scripts_ that _would_ be part of the presigned transactions. These scripts include placeholders for signature checks and the hash prefix check.
-- **Simplified Hash Check:** The `script_check_hash_prefix` function and the script generation (`script_f1_with_signature`, `script_f2_with_signature`) simulate the check `H(x,r)|_B = d` by directly embedding and comparing the `flow_id` (`d`) rather than implementing the hash function (`H`) and bit extraction in Bitcoin Script.
-- **Simulated Signature Check:** The scripts include `OP_CHECKSIGVERIFY` and the signer's public key, but the actual execution (`execute_script_buf` from `bitvm`) doesn't perform cryptographic signature verification in this toy setup. We simulate the _structure_ of the script.
-- **Limited Flows:** We generate `min(2^L, 16)` flows for demonstration purposes, rather than the potentially huge `2^L` required in a real deployment.
-- **Off-Chain Hash Calculation:** The Operator's task of finding a valid nonce `r` (`find_valid_nonce`) and the flow ID calculation (`calculate_flow_id`) are done using Rust's `blake3` library, simulating the off-chain work.
-- **Script Execution:** We use `bitvm::execute_script_buf` to simulate the execution of the simplified `F1` and `F2` check scripts (without the signature/hash checks) to determine if the input satisfies the function constraints.
+  - The overall computation succeeds only if `F1(x) AND F2(x)` is true for the _same_ input `x` within the chosen flow.
+- **Simulated Actors:** Generates `n` Signers and `m` Operators with `secp256k1` key pairs (`SignerInfo`, `OperatorInfo`), but their roles in complex multi-party signing or liveness are simplified.
+- **Simulated Presigning:** Creates placeholder Bitcoin `Transaction` structures (`create_placeholder_tx`) and calculates simplified sighash messages (`create_toy_sighash_message`). It collects real Schnorr signatures but doesn't handle actual UTXO management or realistic fee calculation.
+- **Simplified Bitcoin Script:**
+  - **Hash Check:** The script check `H(x, r)|_B = d` is _simulated_ by directly pushing the expected `flow_id` (`d`) onto the stack and using `OP_EQUALVERIFY` against the `flow_id` provided in the witness. It does _not_ implement the hash function `H` or bit extraction within Bitcoin Script.
+  - **Signature Check:** Scripts include `OP_CHECKSIGVERIFY` and the Signer's public key. However, the `bitvm::execute_script_buf` function used for simulation does _not_ perform cryptographic signature verification. It checks script logic but assumes signatures are valid if provided.
+- **Limited Flows:** Generates `min(2^L, 16)` flows instead of the full `2^L` for performance reasons in this demo.
+- **Off-Chain Hashing:** The Operator's nonce search (`find_valid_nonce`) uses Rust's `blake3` library to simulate the `~2^(B-L)` off-chain work.
 
-## Architecture
+## Project Structure
 
-The project consists of three main parts:
+The codebase is organized into three main Rust modules:
 
-- **`main.rs`**: Parses command-line arguments, sets up the `ColliderVmConfig`, orchestrates the simulation (`simulation::run_simulation`), and prints the final results.
-- **`collidervm_toy.rs`**: Defines the core data structures (`ColliderVmConfig`, `SignerInfo`, `OperatorInfo`), constants (`F1_THRESHOLD`, `F2_THRESHOLD`), helper functions for off-chain calculations (`calculate_blake3_hash`, `calculate_flow_id`, `find_valid_nonce`), and functions to generate the _structure_ of the Bitcoin scripts (`script_f1`, `script_f2`, `script_f1_with_signature`, `script_f2_with_signature`).
-- **`simulation.rs`**: Implements the two main phases of the ColliderVM simulation:
-  - `offline_setup`: Simulates Signer actions (key generation, creating `PresignedFlow` script structures).
-  - `online_execution`: Simulates Operator actions (finding nonce, selecting flow, executing checks).
+- **`src/main.rs`**:
+  - The executable entry point.
+  - Parses command-line arguments (for the input value `x`).
+  - Sets up the `ColliderVmConfig` (n, m, L, B, k).
+  - Calls `simulation::run_simulation` to orchestrate the entire process.
+  - Prints the final simulation results.
+- **`src/collidervm_toy.rs`**:
+  - Defines the core data structures (`ColliderVmConfig`, `SignerInfo`, `OperatorInfo`, `PresignedStep`, `PresignedFlow`).
+  - Contains constants (e.g., `F1_THRESHOLD`).
+  - Implements helper functions primarily used _off-chain_ or for setup:
+    - `create_toy_sighash_message`: Simulates sighash generation.
+    - `calculate_flow_id`: Computes `H(x, r)|_B` using Blake3.
+    - `find_valid_nonce`: Simulates the Operator's hash search.
+  - Implements functions to _build_ the Bitcoin locking scripts (`build_script_f1_locked`, `build_script_f2_locked`) incorporating the simplified logic, hash, and signature checks.
+- **`src/simulation.rs`**:
+  - Implements the two main phases of the ColliderVM simulation protocol:
+    - `offline_setup`: Simulates the Signers generating keys and creating/signing all the `PresignedFlow`s for all potential flow IDs `d`.
+    - `online_execution`: Simulates the Operator finding a nonce for a given input `x`, selecting the corresponding flow `d`, constructing the full witness and script, and executing the F1 and F2 scripts.
+  - Uses helper functions and data structures from `collidervm_toy.rs`.
+  - Uses `bitvm::execute_script_buf` to simulate the execution of the constructed Bitcoin scripts.
 
 ```mermaid
 graph LR
-    subgraph ColliderVM Toy Project
-        A[main.rs] --> B(simulation.rs);
-        B --> C(collidervm_toy.rs);
-        A --> C;
-
-        subgraph simulation.rs
-            D[run_simulation] --> E[offline_setup];
-            D --> F[online_execution];
-        end
-
-        subgraph collidervm_toy.rs
-            G[Data Structures: Config, Actors]
-            H[Constants: Thresholds]
-            I[Off-Chain Helpers: Hashes, Nonce]
-            J[Script Generation Helpers]
-        end
-
-        E --> G;
-        E --> J;
-        F --> G;
-        F --> H;
-        F --> I;
-        F --> J;
+    subgraph Main Entry Point
+        A[main.rs]
     end
-```
-
-## Simulation Flow
-
-The simulation proceeds in two phases, mimicking the ColliderVM protocol:
-
-### Offline Setup Phase (`offline_setup` in `simulation.rs`)
-
-This phase simulates the actions performed by the Signers before any specific input `x` is known.
-
-- **Generate Actors:** Create `n` Signers and `m` Operators, each with a `secp256k1` key pair (`SignerInfo`, `OperatorInfo`).
-- **Generate Presigned Flow Scripts:** For each potential flow ID `d` in the set `D` (up to `min(2^L, 16)` in this simulation):
-  - Generate the script for `F1` including the simulated signature and hash prefix check (`script_f1_with_signature`), using Signer 0's public key and the current `flow_id`.
-  - Generate the script for `F2` similarly (`script_f2_with_signature`).
-  - Store these script structures in a `HashMap` keyed by `flow_id`, representing the set of presigned flows available to the Operator.
-
-```mermaid
-sequenceDiagram
-    participant Main
-    participant Simulation
-    participant Signers(Simulation)
-    participant ToyHelpers
-
-    Main->>Simulation: run_simulation(config, input_value)
-    Simulation->>Signers(Simulation): offline_setup(config)
-    Note over Signers(Simulation): Generate n Signers, m Operators (key pairs)
-    loop For each flow_id d in D (up to min(2^L, 16))
-        Signers(Simulation)->>ToyHelpers: script_f1_with_signature(signer_pubkey, flow_id, B)
-        ToyHelpers-->>Signers(Simulation): f1_script_structure
-        Signers(Simulation)->>ToyHelpers: script_f2_with_signature(signer_pubkey, flow_id, B)
-        ToyHelpers-->>Signers(Simulation): f2_script_structure
-        Signers(Simulation)->>Signers(Simulation): Store {flow_id: (f1_script, f2_script)}
+    subgraph Simulation Logic
+        B[simulation.rs]
+        D[run_simulation] --> E[offline_setup];
+        D --> F[online_execution];
     end
-    Signers(Simulation)-->>Simulation: (signers, operators, presigned_flows_map)
+    subgraph Core Definitions & Helpers
+        C[collidervm_toy.rs]
+        G[Data Structures]
+        H[Constants]
+        I[Off-Chain Helpers: calculate_flow_id, find_valid_nonce]
+        J[Script Building: build_script_fX_locked]
+        K[Sighash Simulation: create_toy_sighash_message]
+    end
+
+    A -- Calls --> D
+    B -- Uses --> C
+
+    E -- Uses --> G; E -- Uses --> J; E -- Uses --> K
+    F -- Uses --> G; F -- Uses --> H; F -- Uses --> I; F -- Uses --> J
+
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style B fill:#ccf,stroke:#333,stroke-width:2px
+    style C fill:#cfc,stroke:#333,stroke-width:2px
 ```
 
-### Online Execution Phase (`online_execution` in `simulation.rs`)
+## Simulation End-to-End Flow
 
-This phase simulates the actions performed by an Operator once an input `x` (`input_value`) is known.
+The `cargo run [input_value]` command triggers the following sequence:
 
-- **Select Operator:** Choose Operator 0 for the simulation.
-- **Find Nonce & Flow ID:**
-  - Call `find_valid_nonce(input_value, B, L)` which iteratively calculates `calculate_flow_id(input_value, nonce, B, L)` (simulating `H(x, r)|_B = d`) until a `nonce` (`r`) is found that produces a `flow_id` (`d`) within the allowed range `[0, 2^L - 1]`. This simulates the Operator's hash collision search work (`~2^(B-L)` effort).
-- **Select Presigned Flow:** Retrieve the corresponding `PresignedFlow` struct (containing the script structures for `F1` and `F2`) from the `HashMap` using the calculated `flow_id`.
-- **Simulate F1 Execution:**
-  - Construct a simple script containing only the `F1` logic (`input_value > F1_THRESHOLD`).
-  - Execute this script using `execute_script_buf`.
-  - Check if the execution was successful _and_ if the `flow_id` calculated in step 2 matches the one associated with the retrieved flow (simulating the `H(x,r)|_B = d` check within the script).
-  - Record `f1_result`.
-- **Simulate F2 Execution:**
-  - Perform a similar process for `F2` (`input_value < F2_THRESHOLD`).
-  - Execute the F2-only script.
-  - Check script success and `flow_id` consistency.
-  - Record `f2_result`.
-- **Determine Overall Success:** The simulation succeeds if and only if `f1_result` AND `f2_result` are both true.
-- **Return Result:** Package the success status and a descriptive message into `SimulationResult`.
+1. **Initialization (`main.rs`)**: Parses the optional `input_value` (or defaults to 114) and sets up the `ColliderVmConfig` (n=3, m=2, L=4, B=8, k=2).
 
-```mermaid
-sequenceDiagram
-    participant Main
-    participant Simulation
-    participant Operator(Simulation)
-    participant ToyHelpers
-    participant ScriptExecutor
+2. **Offline Setup Phase (`simulation::offline_setup`)**: Simulates actions performed by Signers _before_ the input `x` is known.
 
-    Simulation->>Operator(Simulation): online_execution(..., input_value)
-    Operator(Simulation)->>ToyHelpers: find_valid_nonce(input_value, B, L)
-    Note right of ToyHelpers: Simulates ~2^(B-L) hash attempts
-    ToyHelpers-->>Operator(Simulation): (nonce, flow_id)
-    Operator(Simulation)->>Operator(Simulation): Retrieve presigned_flow for flow_id
-    Operator(Simulation)->>ToyHelpers: script_f1()
-    ToyHelpers-->>Operator(Simulation): f1_check_script
-    Operator(Simulation)->>ScriptExecutor: execute_script_buf(f1_check_script with input)
-    ScriptExecutor-->>Operator(Simulation): f1_exec_result
-    Operator(Simulation)->>ToyHelpers: calculate_flow_id(input, nonce, B, L)
-    ToyHelpers-->>Operator(Simulation): calculated_flow_id
-    Operator(Simulation)->>Operator(Simulation): Check f1_exec_result.success AND (calculated_flow_id == flow.flow_id)
-    Note right of Operator(Simulation): Set f1_result
+    - Generates keypairs for 3 Signers and 2 Operators.
+    - Loops `2^L = 16` times (for `flow_id` 0 to 15).
+    - **Inside the loop (for each `flow_id` `d`)**:
+      - **F1 Setup**:
+        - Builds the F1 locking script (`build_script_f1_locked`) containing checks for `x > 100`, `flow_id == d`, and a Signer signature.
+        - Creates a placeholder F1 transaction (`create_placeholder_tx`) spending a dummy input.
+        - Calculates a toy sighash for F1 (`create_toy_sighash_message`).
+        - All 3 Signers sign this sighash, producing signatures.
+        - Stores the F1 template, sighash, signatures, and script in a `PresignedStep`.
+      - **F2 Setup**:
+        - Builds the F2 locking script (`build_script_f2_locked`) containing checks for `x < 200`, `flow_id == d`, and a Signer signature.
+        - Creates a placeholder F2 transaction spending the _output_ of the F1 placeholder transaction.
+        - Calculates a toy sighash for F2.
+        - All 3 Signers sign this sighash.
+        - Stores the F2 template, sighash, signatures, and script in a second `PresignedStep`.
+      - Adds the `PresignedFlow` (containing the F1 and F2 steps) to a `HashMap` keyed by the `flow_id` (`d`).
+    - Returns the generated Signer/Operator info and the `presigned_flows_map`.
 
-    Operator(Simulation)->>ToyHelpers: script_f2()
-    ToyHelpers-->>Operator(Simulation): f2_check_script
-    Operator(Simulation)->>ScriptExecutor: execute_script_buf(f2_check_script with input)
-    ScriptExecutor-->>Operator(Simulation): f2_exec_result
-    Operator(Simulation)->>Operator(Simulation): Check f2_exec_result.success AND (calculated_flow_id == flow.flow_id)
-    Note right of Operator(Simulation): Set f2_result
+3. **Online Execution Phase (`simulation::online_execution`)**: Simulates actions performed by an Operator _after_ the input `x` (`input_value`) is known.
 
-    Operator(Simulation)->>Operator(Simulation): success = f1_result AND f2_result
-    Operator(Simulation)-->>Simulation: SimulationResult{success, message}
-    Simulation-->>Main: SimulationResult
-```
+    - **Nonce Search**: Calls `find_valid_nonce(input_value, B, L)`.
+      - This function starts with `nonce = 0`.
+      - It repeatedly calculates `d = calculate_flow_id(input_value, nonce, B, L)` (which computes `Blake3(input_value || nonce)|_B`).
+      - If `d < 2^L` (i.e., `d` is in the set `D` = {0..15}), it returns the successful `(nonce, d)`. This simulates the `~2^(B-L)` = `~2^(8-4)` = `~16` expected hashes.
+      - If not, it increments the nonce and tries again.
+    - **Flow Selection**: Retrieves the `PresignedFlow` for the `flow_id` (`d`) returned by `find_valid_nonce` from the `presigned_flows_map`.
+    - **(Optional) Off-Chain Checks**: Verifies the Signer 0 signature for F1/F2 and the hash calculation `H(x,r)|_B = d` using Rust crypto functions (for logging/debugging).
+    - **F1 Script Execution**:
+      - Constructs the witness script: `script_builder.push(sig_f1).push(flow_id).push(input_value)`.
+      - Concatenates the witness script bytes with the F1 locking script bytes (`step_f1.locking_script`).
+      - Calls `bitvm::execute_script_buf` on the combined script.
+      - Stores the success/failure result (`script_f1_success`).
+    - **F2 Script Execution**:
+      - Constructs the witness script: `script_builder.push(sig_f2).push(flow_id).push(input_value)`.
+      - Concatenates the witness script bytes with the F2 locking script bytes (`step_f2.locking_script`).
+      - Calls `bitvm::execute_script_buf` on the combined script.
+      - Stores the success/failure result (`script_f2_success`).
+    - **Result Calculation**: Determines overall `success` as `script_f1_success && script_f2_success`.
+    - Returns a `SimulationResult` containing the success status and results of individual script executions.
+
+4. **Output (`main.rs`)**: Prints a summary message indicating whether the simulation succeeded or failed, based on the returned `SimulationResult`.
 
 ## How to Run
 
 - **Prerequisites:** Ensure you have Rust and Cargo installed ([https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)).
 - **Build:** Navigate to the project directory and build the project:
-  
+
   ```bash
   cargo build
   ```
@@ -177,7 +155,7 @@ sequenceDiagram
   cargo run
   ```
 
-  This input (114) satisfies both `F1 (114 > 100)` and `F2 (114 < 200)`, so the simulation should succeed.
+  This input (114) satisfies both `F1 (114 > 100)` and `F2 (114 < 200)`, so the simulation should succeed (assuming a valid nonce is found).
 
 - **Run with Custom Input:** Provide an integer as a command-line argument:
 
@@ -185,18 +163,20 @@ sequenceDiagram
   cargo run <input_value>
   ```
 
-  - Example (Fails F1): `cargo run 90`
-  - Example (Fails F2): `cargo run 250`
+  - Example (Fails F1 logic check): `cargo run 90`
+  - Example (Fails F2 logic check): `cargo run 250`
 
-## TODO list to complete the Toy implementation
+## Future Enhancements
 
-- Generating actual, signable Bitcoin transaction templates.
-- Having Signers produce real `secp256k1` signatures for the presigned flows.
-- Integrating with a Bitcoin library to construct, sign, and potentially broadcast transactions.
-- Handling the complexities of UTXO management and transaction chaining.
-- Managing the potentially massive storage requirements for `2^L` flows.
+To create a more complete implementation, potential improvements include:
 
-This toy simulation provides a foundational understanding of the protocol's structure and flow before tackling these significant implementation challenges.
+- Generate actual, signable Bitcoin transaction templates using `bitcoin` library features.
+- Produce real secp256k1 signatures for the presigned flows.
+- Integrate with Bitcoin libraries for transaction construction and potentially broadcasting.
+- Handle UTXO management and transaction chaining realistically.
+- Implement efficient storage for the potentially large number of flows (`2^L`).
+- Implement the actual hash function `H` and bit extraction `|_B` within Bitcoin script (highly complex).
+- Implement the double/triple collision resistant variants from the paper (Section 2.2).
 
 ## References
 
