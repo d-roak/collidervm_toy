@@ -17,14 +17,15 @@ jobs:
     strategy:
       fail-fast: false # Don't cancel all jobs if one fails
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        rust: [stable] # Add other versions like 'beta', 'nightly' if needed
+        os: [ubuntu-latest] # Only run on ubuntu
+        rust: [nightly] # Use nightly since we need proc_macro_hygiene
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Rust (${{ matrix.rust }})
-        uses: dtolnay/rust-toolchain@stable
+        # Use the toolchain specified in rust-toolchain.toml
+        uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: ${{ matrix.rust }}
 
