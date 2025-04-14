@@ -1,17 +1,9 @@
 use bitcoin::{
-    Amount,
-    PublicKey,
-    Transaction,
-    XOnlyPublicKey,
+    Amount, PublicKey, Transaction, XOnlyPublicKey,
     blockdata::script::{Builder, ScriptBuf},
     opcodes,
-    // Remove unused imports: Sequence, TxIn, TxOut, Witness
-    // Remove unused sighash imports: self, SighashCache, TapSighashType
 };
-// Add HashEngine trait import
-use bitcoin_hashes::{Hash as BitcoinHashTrait, HashEngine, sha256};
-// Remove unused bitvm imports
-// Remove unused Secp256k1 import
+use bitcoin_hashes::{HashEngine, sha256};
 use blake3::Hasher;
 use secp256k1::{Keypair, Message, SecretKey, schnorr::Signature}; // Keep necessary secp types
 use std::collections::HashMap;
@@ -31,45 +23,40 @@ pub type _InputX = Vec<u8>; // Keeping alias for potential future use
 pub type _NonceR = Vec<u8>; // Keeping alias for potential future use
 
 // --- Actors ---
-#[derive(Debug, Clone)] // Added Clone
+#[derive(Debug, Clone)]
 pub struct SignerInfo {
-    pub id: usize,
-    // Use bitcoin::PublicKey for compatibility with script generation
+    pub _id: usize,
     pub pubkey: PublicKey,
-    // Store the secp256k1::SecretKey for signing
-    pub privkey: SecretKey,
+    pub _privkey: SecretKey,
     pub keypair: Keypair,
     pub xonly: XOnlyPublicKey,
 }
 
-#[derive(Debug, Clone)] // Added Clone
+#[derive(Debug, Clone)]
 pub struct OperatorInfo {
-    pub id: usize,
+    pub _id: usize,
     pub pubkey: PublicKey,
-    pub privkey: SecretKey,
+    pub _privkey: SecretKey,
 }
-
-// --- New Data Structures for Presigned Flows ---
-
 /// Represents a single step in a presigned flow (e.g., F1 or F2 execution)
 #[derive(Clone, Debug)]
 pub struct PresignedStep {
     /// Placeholder for the transaction structure committed to during signing.
     /// For the toy, this might be simplified.
-    pub tx_template: Transaction,
+    pub _tx_template: Transaction,
     /// The actual sighash message that was signed by the signers.
     pub sighash_message: Message,
     /// Map from Signer's PublicKey (as bytes for HashMap key) to their Schnorr signature.
     pub signatures: HashMap<Vec<u8>, Signature>,
     /// The scriptPubKey that enforces the logic (sig check, hash check, function check).
     /// This is embedded in tx_template.output[.].script_pubkey.
-    pub locking_script: ScriptBuf,
+    pub _locking_script: ScriptBuf,
 }
 
 /// Represents a complete presigned flow for a specific flow_id 'd'
 #[derive(Clone, Debug)]
 pub struct PresignedFlow {
-    pub flow_id: u32,
+    pub _flow_id: u32,
     /// Sequence of steps, e.g., [step_f1, step_f2]
     pub steps: Vec<PresignedStep>,
 }
@@ -82,7 +69,7 @@ pub const F2_THRESHOLD: u32 = 200;
 
 /// Rust implementation of the Blake3 hash. Used for off-chain calculations.
 /// Takes arbitrary bytes, returns the 32-byte Blake3 hash.
-pub fn calculate_blake3_hash(data: &[u8]) -> [u8; 32] {
+pub fn _calculate_blake3_hash(data: &[u8]) -> [u8; 32] {
     *blake3::hash(data).as_bytes()
 }
 
@@ -99,26 +86,6 @@ pub fn create_toy_sighash_message(locking_script: &ScriptBuf, value: Amount) -> 
 }
 
 // --- Script Generation Helpers ---
-
-/// Generates the script for F1(x): checks if x > F1_THRESHOLD.
-/// Assumes input x is pushed onto the stack before this script segment.
-pub fn script_f1_logic() -> ScriptBuf {
-    Builder::new()
-        .push_int(F1_THRESHOLD as i64)
-        .push_opcode(opcodes::all::OP_GREATERTHAN) // Check x > threshold
-        .push_opcode(opcodes::all::OP_VERIFY) // Fail if false
-        .into_script()
-}
-
-/// Generates the script for F2(x): checks if x < F2_THRESHOLD.
-/// Assumes input x is pushed onto the stack before this script segment.
-pub fn script_f2_logic() -> ScriptBuf {
-    Builder::new()
-        .push_int(F2_THRESHOLD as i64)
-        .push_opcode(opcodes::all::OP_LESSTHAN) // Check x < threshold
-        .push_opcode(opcodes::all::OP_VERIFY) // Fail if false
-        .into_script()
-}
 
 /// Calculate flow ID from input and nonce (Off-chain logic)
 /// Simulates H(x,r)|B to find which flow to use.

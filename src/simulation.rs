@@ -4,9 +4,7 @@ use bitcoin::{
     Amount, OutPoint, PublicKey, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
     blockdata::script::ScriptBuf,
 };
-use bitcoin_hashes::Hash as BitcoinHashTrait; // For Txid default
-use bitvm::{self, execute_script_buf}; // Keep using bitvm executor for logic check
-use secp256k1::{self, Keypair, Message, Secp256k1, SecretKey, schnorr::Signature}; // For signing/verification
+use secp256k1::{Keypair, Secp256k1}; // For signing/verification
 
 use crate::collidervm_toy::{
     ColliderVmConfig, F1_THRESHOLD, F2_THRESHOLD, OperatorInfo, PresignedFlow, PresignedStep,
@@ -15,20 +13,16 @@ use crate::collidervm_toy::{
 };
 
 // --- Simulation Structures ---
-// (PresignedFlow and PresignedStep are now defined in collidervm_toy.rs)
-
 pub struct SimulationResult {
     pub success: bool,
-    pub f1_result: bool, // Made public for clarity
-    pub f2_result: bool, // Made public for clarity
+    pub _f1_result: bool, // Made public for clarity
+    pub _f2_result: bool, // Made public for clarity
     pub message: String,
 }
 
-// Updated type alias for the return type of offline_setup
 type SetupResult = (
     Vec<SignerInfo>,
     Vec<OperatorInfo>,
-    // The map now holds the new PresignedFlow struct
     HashMap<u32, PresignedFlow>,
 );
 
@@ -36,11 +30,11 @@ type SetupResult = (
 fn create_placeholder_tx(
     locking_script: ScriptBuf,
     value: Amount,
-    input_txid: Txid, // Previous txid for input
-    input_vout: u32,  // Previous vout for input
+    input_txid: Txid,
+    input_vout: u32,
 ) -> Transaction {
     Transaction {
-        version: bitcoin::transaction::Version::TWO, // Or ONE
+        version: bitcoin::transaction::Version::TWO,
         lock_time: bitcoin::absolute::LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint {
@@ -81,10 +75,9 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
         let keypair = Keypair::from_secret_key(&secp, &privkey);
         let (xonly, _parity) = keypair.x_only_public_key();
         let signer = SignerInfo {
-            id: i,
-            // Convert secp256k1::PublicKey to bitcoin::PublicKey
+            _id: i,
             pubkey: PublicKey::new(secp_pubkey),
-            privkey: privkey,
+            _privkey: privkey,
             keypair,
             xonly,
         };
@@ -96,9 +89,9 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
     for i in 0..config.m {
         let (privkey, secp_pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let operator = OperatorInfo {
-            id: i,
+            _id: i,
             pubkey: PublicKey::new(secp_pubkey),
-            privkey: privkey,
+            _privkey: privkey,
         };
         println!("  Generated Operator {}: {}", i, operator.pubkey);
         operators.push(operator);
@@ -148,10 +141,10 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
 
         // 1e. Create Presigned Step for F1
         steps.push(PresignedStep {
-            tx_template: tx_f1_template.clone(), // Store the template
+            _tx_template: tx_f1_template.clone(), // Store the template
             sighash_message: sighash_msg_f1,
             signatures: signatures_f1,
-            locking_script: script_f1,
+            _locking_script: script_f1,
         });
 
         // --- Presign Step 2 (F2) ---
@@ -170,14 +163,20 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
             signatures_f2.insert(signer.pubkey.to_bytes(), signature);
         }
         steps.push(PresignedStep {
-            tx_template: tx_f2_template,
+            _tx_template: tx_f2_template,
             sighash_message: sighash_msg_f2,
             signatures: signatures_f2,
-            locking_script: script_f2,
+            _locking_script: script_f2,
         });
 
         // Add the fully signed flow to the map
-        presigned_flows_map.insert(flow_id, PresignedFlow { flow_id, steps });
+        presigned_flows_map.insert(
+            flow_id,
+            PresignedFlow {
+                _flow_id: flow_id,
+                steps,
+            },
+        );
 
         if flow_id % 4 == 3 || flow_id == num_flows as u32 - 1 {
             println!("  Created and presigned flow {}...", flow_id);
@@ -242,7 +241,7 @@ pub fn online_execution(
         .get(&signer0_pubkey.to_bytes())
         .ok_or("Signature from signer 0 not found for step 1")?;
     let signature_f1_valid = secp
-        .verify_schnorr(signature_f1, &step_f1.sighash_message, &signer0_xonly)
+        .verify_schnorr(signature_f1, &step_f1.sighash_message, signer0_xonly)
         .is_ok();
     println!(
         "  Signature Check (Signer 0): {}",
@@ -299,7 +298,7 @@ pub fn online_execution(
         .get(&signer0_pubkey.to_bytes())
         .ok_or("Signature from signer 0 not found for step 2")?;
     let signature_f2_valid = secp
-        .verify_schnorr(signature_f2, &step_f2.sighash_message, &signer0_xonly)
+        .verify_schnorr(signature_f2, &step_f2.sighash_message, signer0_xonly)
         .is_ok();
     println!(
         "  Signature Check (Signer 0): {}",
@@ -361,8 +360,8 @@ pub fn online_execution(
 
     Ok(SimulationResult {
         success: overall_success,
-        f1_result: f1_step_success,
-        f2_result: f2_step_success,
+        _f1_result: f1_step_success,
+        _f2_result: f2_step_success,
         message: result_message,
     })
 }
