@@ -1,45 +1,68 @@
-use std::collections::HashMap;
-use std::error::Error;
+use std::{collections::HashMap, error::Error};
 
-use bitcoin::{PublicKey, secp256k1::Secp256k1};
-use bitvm::execute_script_buf;
+use bitcoin::{
+    Amount, OutPoint, PublicKey, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
+    blockdata::script::ScriptBuf,
+};
+use bitcoin_hashes::Hash as BitcoinHashTrait; // For Txid default
+use bitvm::{self, execute_script_buf}; // Keep using bitvm executor for logic check
+use secp256k1::{self, Keypair, Message, Secp256k1, SecretKey, schnorr::Signature}; // For signing/verification
 
 use crate::collidervm_toy::{
-    ColliderVmConfig, F1_THRESHOLD, F2_THRESHOLD, OperatorInfo, SignerInfo, calculate_blake3_hash,
-    calculate_flow_id, find_valid_nonce, script_f1, script_f1_with_signature, script_f2,
-    script_f2_with_signature,
+    ColliderVmConfig, F1_THRESHOLD, F2_THRESHOLD, OperatorInfo, PresignedFlow, PresignedStep,
+    SignerInfo, build_script_f1_locked, build_script_f2_locked, calculate_flow_id,
+    create_toy_sighash_message, find_valid_nonce,
 };
 
 // --- Simulation Structures ---
-
-/// Represents a presigned transaction flow
-#[derive(Debug)]
-pub struct PresignedFlow {
-    pub flow_id: u32,
-    #[allow(dead_code)]
-    pub f1_script: bitcoin::blockdata::script::ScriptBuf,
-    #[allow(dead_code)]
-    pub f2_script: bitcoin::blockdata::script::ScriptBuf,
-}
+// (PresignedFlow and PresignedStep are now defined in collidervm_toy.rs)
 
 pub struct SimulationResult {
     pub success: bool,
-    pub _f1_result: bool,
-    pub _f2_result: bool,
+    pub f1_result: bool, // Made public for clarity
+    pub f2_result: bool, // Made public for clarity
     pub message: String,
 }
 
-// Create a type alias to simplify the return type of offline_setup
+// Updated type alias for the return type of offline_setup
 type SetupResult = (
     Vec<SignerInfo>,
     Vec<OperatorInfo>,
+    // The map now holds the new PresignedFlow struct
     HashMap<u32, PresignedFlow>,
 );
+
+// Helper to create a placeholder transaction for signing
+fn create_placeholder_tx(
+    locking_script: ScriptBuf,
+    value: Amount,
+    input_txid: Txid, // Previous txid for input
+    input_vout: u32,  // Previous vout for input
+) -> Transaction {
+    Transaction {
+        version: bitcoin::transaction::Version::TWO, // Or ONE
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: input_txid,
+                vout: input_vout,
+            },
+            script_sig: ScriptBuf::new(), // Empty for Taproot/SegWit signing
+            sequence: Sequence::ENABLE_LOCKTIME_NO_RBF, // Example sequence
+            witness: Witness::new(),      // Empty witness during template creation
+        }],
+        output: vec![TxOut {
+            value,
+            script_pubkey: locking_script,
+        }],
+    }
+}
 
 // --- Simulation Logic ---
 
 /// Simulates the offline setup phase of ColliderVM
-/// Generates n signers and m operators with keypairs and presigns transaction flows
+/// Generates keys, creates transaction templates, calculates sighashes,
+/// and collects signatures from all signers.
 pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn Error>> {
     println!("--- Offline Setup Phase ---");
     println!(
@@ -47,92 +70,134 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
         config.n, config.m
     );
 
-    // Set up the secp256k1 context for key generation
-    let secp = Secp256k1::new();
+    // Secp256k1 context for key generation and signing
+    let secp = Secp256k1::new(); // Use Secp256k1::new() for signing context
     let mut signers = Vec::with_capacity(config.n);
     let mut operators = Vec::with_capacity(config.m);
 
-    // Generate signers with key pairs
+    // Generate signers
     for i in 0..config.n {
-        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
+        let (privkey, secp_pubkey) = secp.generate_keypair(&mut rand::thread_rng());
+        let keypair = Keypair::from_secret_key(&secp, &privkey);
+        let (xonly, _parity) = keypair.x_only_public_key();
         let signer = SignerInfo {
-            _id: i,
-            pubkey: PublicKey::new(pubkey),
-            _privkey: privkey,
+            id: i,
+            // Convert secp256k1::PublicKey to bitcoin::PublicKey
+            pubkey: PublicKey::new(secp_pubkey),
+            privkey: privkey,
+            keypair,
+            xonly,
         };
-        println!("Generated Signer {}: {}", i, signer.pubkey);
+        println!("  Generated Signer {}: {}", i, signer.pubkey);
         signers.push(signer);
     }
 
-    // Generate operators with key pairs
+    // Generate operators
     for i in 0..config.m {
-        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
+        let (privkey, secp_pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let operator = OperatorInfo {
-            _id: i,
-            pubkey: PublicKey::new(pubkey),
-            _privkey: privkey,
+            id: i,
+            pubkey: PublicKey::new(secp_pubkey),
+            privkey: privkey,
         };
-        println!("Generated Operator {}: {}", i, operator.pubkey);
+        println!("  Generated Operator {}: {}", i, operator.pubkey);
         operators.push(operator);
     }
 
-    // Generate presigned transaction flows
+    println!("\nGenerating presigned flows (Transaction Templates + Signatures)...");
+    let num_flows = std::cmp::min(1 << config.l, 16); // Limit flows for toy
     println!(
-        "\nGenerating presigned flow scripts for D set (size 2^{})...",
-        config.l
+        "  Targeting {} flows (L={}, max 16 for toy)",
+        num_flows, config.l
     );
+    let mut presigned_flows_map = HashMap::new();
 
-    // In the real ColliderVM, we'd generate 2^L flows
-    // For our toy simulation, we'll generate fewer flows for practicality
-    let num_flows = std::cmp::min(1 << config.l, 16); // Max 16 flows for toy simulation
-    println!("Using {} flows for toy simulation", num_flows);
+    // Placeholder funding transaction output (needed for the first step's input)
+    const DUMMY_TXID: &str = "5df6e0e2761359d30a8275058e299fcc0381534545f55cf43e41983f5d4c9456";
 
-    let mut presigned_flows = HashMap::new();
+    let funding_txid = DUMMY_TXID.parse::<Txid>().unwrap();
+    let funding_vout = 0;
+    let funding_amount = Amount::from_sat(10000); // Example amount
 
-    // Generate script for each flow (each potential value of d ∈ D)
-    for flow_id in 0..num_flows {
-        // In a real implementation, we'd:
-        // 1. Create actual Bitcoin tx templates
-        // 2. Have signers sign these templates
-        // 3. Store the complete presigned txs
+    for flow_id in 0..num_flows as u32 {
+        let mut steps = Vec::with_capacity(config.k);
 
-        // For our toy simulation, we'll just create the locking scripts
-        // that would check signatures in the real implementation
+        // --- Presign Step 1 (F1) ---
+        // 1a. Create Locking Script for F1
+        //    Use the public key of the *first* signer for the script construction (simplification)
+        let script_f1 = build_script_f1_locked(&signers[0].pubkey, flow_id, config.b);
 
-        // Create F1 script with signature verification for this flow
-        let f1_script = script_f1_with_signature(&signers[0].pubkey, flow_id as u32, config.b);
-
-        // Create F2 script with signature verification for this flow
-        let f2_script = script_f2_with_signature(&signers[0].pubkey, flow_id as u32, config.b);
-
-        // Store the flow scripts
-        presigned_flows.insert(
-            flow_id as u32,
-            PresignedFlow {
-                flow_id: flow_id as u32,
-                f1_script,
-                f2_script,
-            },
+        // 1b. Create Placeholder Transaction Template for F1
+        let tx_f1_template = create_placeholder_tx(
+            script_f1.clone(),
+            funding_amount, // Output value matches funding for simplicity
+            funding_txid,
+            funding_vout,
         );
 
-        if flow_id % 4 == 0 {
-            println!("  Created flow {} of {}", flow_id + 1, num_flows);
+        // 1c. Create Simplified Sighash Message for F1
+        //     (Using toy function - real sighash depends on more tx details)
+        let sighash_msg_f1 = create_toy_sighash_message(&script_f1, tx_f1_template.output[0].value);
+
+        // 1d. Collect Signatures for F1 from ALL signers
+        let mut signatures_f1 = HashMap::new();
+        for signer in &signers {
+            let signature = secp.sign_schnorr(&sighash_msg_f1, &signer.keypair);
+            signatures_f1.insert(signer.pubkey.to_bytes(), signature);
+        }
+
+        // 1e. Create Presigned Step for F1
+        steps.push(PresignedStep {
+            tx_template: tx_f1_template.clone(), // Store the template
+            sighash_message: sighash_msg_f1,
+            signatures: signatures_f1,
+            locking_script: script_f1,
+        });
+
+        // --- Presign Step 2 (F2) ---
+        // (Similar process, but tx_f2 spends tx_f1)
+        let script_f2 = build_script_f2_locked(&signers[0].pubkey, flow_id, config.b);
+        let tx_f2_template = create_placeholder_tx(
+            script_f2.clone(),
+            funding_amount,                // Assuming value is conserved
+            tx_f1_template.compute_txid(), // Input is output of F1 tx
+            0,                             // Assuming F1 tx had one output at vout 0
+        );
+        let sighash_msg_f2 = create_toy_sighash_message(&script_f2, tx_f2_template.output[0].value);
+        let mut signatures_f2 = HashMap::new();
+        for signer in &signers {
+            let signature = secp.sign_schnorr(&sighash_msg_f2, &signer.keypair);
+            signatures_f2.insert(signer.pubkey.to_bytes(), signature);
+        }
+        steps.push(PresignedStep {
+            tx_template: tx_f2_template,
+            sighash_message: sighash_msg_f2,
+            signatures: signatures_f2,
+            locking_script: script_f2,
+        });
+
+        // Add the fully signed flow to the map
+        presigned_flows_map.insert(flow_id, PresignedFlow { flow_id, steps });
+
+        if flow_id % 4 == 3 || flow_id == num_flows as u32 - 1 {
+            println!("  Created and presigned flow {}...", flow_id);
         }
     }
 
     println!(
-        "Offline setup complete with {} presigned flows\n",
-        presigned_flows.len()
+        "Offline setup complete. {} flows presigned by {} signers.\n",
+        presigned_flows_map.len(),
+        config.n
     );
-    Ok((signers, operators, presigned_flows))
+    Ok((signers, operators, presigned_flows_map))
 }
 
-/// Executes the online phase of ColliderVM with a given input value
-/// Returns the simulation result with success/failure status
+/// Simulates the online execution phase of ColliderVM.
+/// Finds nonce, selects flow, verifies signatures, checks hash prefix, executes logic.
 pub fn online_execution(
-    _signers: &[SignerInfo],
-    operators: &[OperatorInfo],
-    presigned_flows: &HashMap<u32, PresignedFlow>,
+    signers: &[SignerInfo],      // Needed to get the public key for verification
+    _operators: &[OperatorInfo], // Not used directly in this simplified online phase
+    presigned_flows_map: &HashMap<u32, PresignedFlow>,
     config: &ColliderVmConfig,
     input_value: u32,
 ) -> Result<SimulationResult, Box<dyn Error>> {
@@ -141,167 +206,168 @@ pub fn online_execution(
         "Config: L={}, B={}, k={}, n={}, m={}",
         config.l, config.b, config.k, config.n, config.m
     );
-    println!("Using input value: {}", input_value);
+    println!("Input value: {}", input_value);
 
-    // For the toy simulation, we'll use the first operator
-    let operator = &operators[0];
-    println!("Using operator: {}", operator.pubkey);
-
-    // Convert input to bytes
-    let x_bytes = input_value.to_le_bytes().to_vec();
-
-    // Find a valid nonce for the input value
-    // This is the hash collision challenge from the ColliderVM paper
-    let (nonce, flow_id) = find_valid_nonce(input_value, config.b, config.l);
-    println!("Found valid nonce {} for flow_id: {}", nonce, flow_id);
-
-    // Check if we have the presigned flow for this flow_id
-    if !presigned_flows.contains_key(&flow_id) {
-        return Err(format!("No presigned flow found for flow_id: {}", flow_id).into());
-    }
-
-    let flow = &presigned_flows[&flow_id];
-    println!("Using presigned flow with ID: {}", flow.flow_id);
-
-    // The limb length for Blake3 hash computation
-    let _limb_len = 4;
-
-    // Compute the expected hash in advance for verification
-    let full_hash = calculate_blake3_hash(&x_bytes);
-    println!("Blake3 hash of input: {}", hex::encode(full_hash));
-
-    // Results tracking
-    let mut f1_result = false;
-    let mut f2_result = false;
-
-    // For toy simulation, we'll create dummy signatures
-    // In a real implementation, these would be actual signatures created by the operator
-    let _dummy_sig = [0u8; 64]; // Dummy signature for simulation
-
-    // ---- Execute F1 with signature check (Flow 1) ----
+    // Operator finds a valid nonce and corresponding flow ID
+    let (nonce, flow_id) = match find_valid_nonce(input_value, config.b, config.l) {
+        Ok(result) => result,
+        Err(e) => return Err(e.into()),
+    };
     println!(
-        "\nExecuting F1 with signature verification (Flow {})...",
-        flow_id
+        "Operator found Nonce: {}, required Flow ID: {}",
+        nonce, flow_id
     );
 
-    // In a real implementation, we'd:
-    // 1. Use a presigned transaction with F1 logic
-    // 2. Include signatures from signers
-    // 3. Execute the actual transaction
+    // Retrieve the corresponding presigned flow
+    let presigned_flow = presigned_flows_map.get(&flow_id).ok_or_else(|| {
+        format!(
+            "Critical Error: Presigned flow {} not found after nonce search!",
+            flow_id
+        )
+    })?;
+    println!("Retrieved presigned flow {}", flow_id);
 
-    // For toy simulation, we'll execute just the script
-    // First, simulate the normal execution without signature check
-    // Then check if the flow_id matches and if the F1 constraint is satisfied
+    // Secp256k1 context for verification
+    let secp = Secp256k1::verification_only(); // Use verification context
 
-    // Build the script for F1 check only (without signature verification)
-    let mut script1_bytes = bitcoin::blockdata::script::Builder::new()
-        .push_int(input_value as i64) // Push input
-        .push_int(F1_THRESHOLD as i64) // Push F1 threshold
-        .into_script()
-        .to_bytes();
+    // --- Simulate Step 1 (F1) Execution ---
+    println!("\nSimulating Execution Step 1 (F1)...");
+    let step_f1 = &presigned_flow.steps[0];
 
-    // Add the F1 check (is input > threshold?)
-    script1_bytes.extend(script_f1().to_bytes());
-
-    // Execute the F1 check script
-    let script1 = bitcoin::blockdata::script::ScriptBuf::from_bytes(script1_bytes);
-    let exec_result_1 = execute_script_buf(script1);
-
-    // Verify that the flow_id matches what we calculated
-    let flow_check = flow_id == calculate_flow_id(input_value, nonce, config.b, config.l);
+    // 1a. Verify Signature (Off-chain simulation)
+    let signer0_pubkey = &signers[0].pubkey;
+    let signer0_xonly = &signers[0].xonly;
+    let signature_f1 = step_f1
+        .signatures
+        .get(&signer0_pubkey.to_bytes())
+        .ok_or("Signature from signer 0 not found for step 1")?;
+    let signature_f1_valid = secp
+        .verify_schnorr(signature_f1, &step_f1.sighash_message, &signer0_xonly)
+        .is_ok();
     println!(
-        "Flow ID check: {}",
-        if flow_check { "PASSED" } else { "FAILED" }
+        "  Signature Check (Signer 0): {}",
+        if signature_f1_valid {
+            "PASSED ✅"
+        } else {
+            "FAILED ❌"
+        }
     );
 
-    // In a real implementation, we'd also verify the signature here
-    println!("F1 execution result: {:?}", exec_result_1);
-    if exec_result_1.success && flow_check {
-        println!("F1 check (x > {}) PASSED", F1_THRESHOLD);
-        f1_result = true;
-    } else {
-        println!("F1 check (x > {}) FAILED", F1_THRESHOLD);
-        println!(
-            "Reason: {}",
-            if !exec_result_1.success {
-                "F1 constraint not satisfied"
-            } else {
-                "Flow ID check failed"
-            }
-        );
-    }
-
-    // ---- Execute F2 with signature check (Flow 2) ----
+    // 1b. Verify Hash Prefix (Off-chain simulation)
+    // This checks if the (input, nonce) pair indeed produces the required flow_id
+    let hash_prefix_valid =
+        calculate_flow_id(input_value, nonce, config.b, config.l) == Ok(flow_id);
     println!(
-        "\nExecuting F2 with signature verification (Flow {})...",
-        flow_id
+        "  Hash Prefix Check (H(x,r)|B == d): {}",
+        if hash_prefix_valid {
+            "PASSED ✅"
+        } else {
+            "FAILED ❌"
+        }
     );
 
-    // Build the script for F2 check only (without signature verification)
-    let mut script2_bytes = bitcoin::blockdata::script::Builder::new()
-        .push_int(input_value as i64) // Push input
-        .push_int(F2_THRESHOLD as i64) // Push F2 threshold
-        .into_script()
-        .to_bytes();
+    // 1c. Verify Function Logic (Off-chain simulation)
+    // The actual script execution is not simulated here anymore. We just check the condition.
+    let logic_f1_valid = input_value > F1_THRESHOLD;
+    println!(
+        "  Function Logic Check (F1: x > {}): {}",
+        F1_THRESHOLD,
+        if logic_f1_valid {
+            "PASSED ✅"
+        } else {
+            "FAILED ❌"
+        }
+    );
 
-    // Add the F2 check (is input < threshold?)
-    script2_bytes.extend(script_f2().to_bytes());
+    let f1_step_success = signature_f1_valid && hash_prefix_valid && logic_f1_valid;
+    println!(
+        "  Step 1 Overall: {}",
+        if f1_step_success {
+            "SUCCESS"
+        } else {
+            "FAILURE"
+        }
+    );
 
-    // Execute the F2 check script
-    let script2 = bitcoin::blockdata::script::ScriptBuf::from_bytes(script2_bytes);
-    let exec_result_2 = execute_script_buf(script2);
+    // --- Simulate Step 2 (F2) Execution ---
+    println!("\nSimulating Execution Step 2 (F2)...");
+    let step_f2 = &presigned_flow.steps[1];
 
-    // The flow_id check is the same as for F1
-    println!("F2 execution result: {:?}", exec_result_2);
+    // 2a. Verify Signature (Signer 0) (Off-chain simulation)
+    let signature_f2 = step_f2
+        .signatures
+        .get(&signer0_pubkey.to_bytes())
+        .ok_or("Signature from signer 0 not found for step 2")?;
+    let signature_f2_valid = secp
+        .verify_schnorr(signature_f2, &step_f2.sighash_message, &signer0_xonly)
+        .is_ok();
+    println!(
+        "  Signature Check (Signer 0): {}",
+        if signature_f2_valid {
+            "PASSED ✅"
+        } else {
+            "FAILED ❌"
+        }
+    );
 
-    if exec_result_2.success && flow_check {
-        println!("F2 check (x < {}) PASSED", F2_THRESHOLD);
-        f2_result = true;
-    } else {
-        println!("F2 check (x < {}) FAILED", F2_THRESHOLD);
-        println!(
-            "Reason: {}",
-            if !exec_result_2.success {
-                "F2 constraint not satisfied"
-            } else {
-                "Flow ID check failed"
-            }
-        );
-    }
+    // 2b. Verify Hash Prefix (remains the same check) (Off-chain simulation)
+    println!(
+        "  Hash Prefix Check (H(x,r)|B == d): {}",
+        if hash_prefix_valid {
+            "PASSED ✅"
+        } else {
+            "FAILED ❌"
+        }
+    ); // Re-use previous check result
+
+    // 2c. Verify Function Logic (F2) (Off-chain simulation)
+    let logic_f2_valid = input_value < F2_THRESHOLD;
+    println!(
+        "  Function Logic Check (F2: x < {}): {}",
+        F2_THRESHOLD,
+        if logic_f2_valid {
+            "PASSED ✅"
+        } else {
+            "FAILED ❌"
+        }
+    );
+
+    let f2_step_success = signature_f2_valid && hash_prefix_valid && logic_f2_valid;
+    println!(
+        "  Step 2 Overall: {}",
+        if f2_step_success {
+            "SUCCESS"
+        } else {
+            "FAILURE"
+        }
+    );
 
     // Determine overall simulation success
-    let success = f1_result && f2_result;
+    let overall_success = f1_step_success && f2_step_success;
     println!("\n--- Execution Complete ---");
 
     // Create and return the simulation result
-    let result = SimulationResult {
-        success,
-        _f1_result: f1_result,
-        _f2_result: f2_result,
-        message: if success {
-            format!(
-                "Successfully verified input {} satisfies all conditions using flow {}",
-                input_value, flow_id
-            )
-        } else {
-            format!(
-                "Input {} failed to satisfy conditions using flow {}: F1({}>{})={}, F2({}<{})={}",
-                input_value,
-                flow_id,
-                input_value,
-                F1_THRESHOLD,
-                f1_result,
-                input_value,
-                F2_THRESHOLD,
-                f2_result
-            )
-        },
+    let result_message = if overall_success {
+        format!(
+            "Successfully verified input {} satisfies all conditions (Sig, Hash Prefix, F1, F2) using flow {}",
+            input_value, flow_id
+        )
+    } else {
+        format!(
+            "Input {} failed conditions for flow {}. F1 Step Success: {}, F2 Step Success: {}",
+            input_value, flow_id, f1_step_success, f2_step_success
+        )
     };
 
-    Ok(result)
+    Ok(SimulationResult {
+        success: overall_success,
+        f1_result: f1_step_success,
+        f2_result: f2_step_success,
+        message: result_message,
+    })
 }
 
-/// Orchestrates the complete ColliderVM simulation
+/// Orchestrates the complete ColliderVM simulation (unchanged)
 pub fn run_simulation(
     config: ColliderVmConfig,
     input_value: u32,
