@@ -175,7 +175,7 @@ To create a more complete implementation, potential improvements include:
 - Integrate with Bitcoin libraries for transaction construction and potentially broadcasting.
 - Handle UTXO management and transaction chaining realistically.
 - Implement efficient storage for the potentially large number of flows (`2^L`).
-- Implement the actual hash function `H` and bit extraction `|_B` within Bitcoin script (highly complex).
+- Implement the actual hash function `H` and bit extraction `|_B` within Bitcoin script.
 - Implement the double/triple collision resistant variants from the paper (Section 2.2).
 
 ## References

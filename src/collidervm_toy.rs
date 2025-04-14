@@ -313,3 +313,49 @@ pub fn build_script_f2_locked(
         .push_opcode(opcodes::OP_TRUE)
         .into_script()
 }
+
+#[cfg(test)]
+mod tests {
+
+    use bitcoin_script_stack::optimizer;
+    use bitvm::{
+        execute_script_buf,
+        hash::blake3::{
+            blake3_compute_script_with_limb, blake3_push_message_script_with_limb,
+            blake3_verify_output_script,
+        },
+    };
+
+    use super::*;
+
+    // Test Blake3 script generation
+    #[test]
+    fn test_blake3_script_generation() {
+        let message = [0x00; 32];
+        let limb_len = 4;
+        let expected_hash = *blake3::hash(message.as_ref()).as_bytes();
+
+        println!("Expected hash: {}", hex::encode(expected_hash));
+
+        let mut bytes = blake3_push_message_script_with_limb(&message, limb_len)
+            .compile()
+            .to_bytes();
+        let optimized =
+            optimizer::optimize(blake3_compute_script_with_limb(message.len(), limb_len).compile());
+        bytes.extend(optimized.to_bytes());
+        bytes.extend(
+            blake3_verify_output_script(expected_hash)
+                .compile()
+                .to_bytes(),
+        );
+        let script = ScriptBuf::from_bytes(bytes);
+        //let script_asm = script.to_asm_string();
+
+        // Print the script ASM for debugging
+        //println!("Blake3 script ASM: {}", script_asm);
+
+        let result = execute_script_buf(script);
+
+        println!("Result: {:?}", result);
+    }
+}
