@@ -6,7 +6,6 @@ mod simulation;
 use clap::{Parser, ValueEnum};
 use collidervm_toy::{ColliderVmConfig, benchmark_hash_rate};
 use colored::*; // Import the colored crate
-use std::cmp;
 
 #[derive(Parser)]
 #[command(
@@ -73,19 +72,30 @@ enum Preset {
 /// - l_param: The L parameter (size of set D = 2^L)
 /// - target_seconds: How long we want the hash finding to take
 fn calculate_b_param(hash_rate: u64, l_param: usize, target_seconds: f64) -> usize {
-    // We want to find B such that 2^(B-L) hashes take approximately target_seconds
-    // Or: hash_rate * target_seconds ≈ 2^(B-L)
-    // So: B ≈ log2(hash_rate * target_seconds) + L
+    // For a hash collision search with parameters L and B, we need to try
+    // approximately 2^(B-L) hashes to find a match.
+    // If we want this to take target_seconds, we need:
+    // 2^(B-L) ≈ hash_rate * target_seconds
+    // Taking log2 of both sides:
+    // B-L ≈ log2(hash_rate * target_seconds)
+    // Therefore: B ≈ L + log2(hash_rate * target_seconds)
 
     // Cap the target to prevent extremely long calculations
     let capped_target = target_seconds.min(120.0); // Maximum 2 minutes
 
-    let hashes_needed = (hash_rate as f64 * capped_target) as u64;
-    let log2_hashes = (hashes_needed as f64).log2().ceil() as usize;
+    // We want to find a B such that 2^(B-L) hashes will take target_seconds
+    // First, determine how many hashes we can do in target_seconds
+    let hashes_in_target_time = hash_rate as f64 * capped_target;
 
-    // Add safety margin and ensure B is at least L+4, but not larger than L+30
-    // This prevents overflow or unreasonably long calculations
-    cmp::min(l_param + 30, cmp::max(l_param + 4, log2_hashes + l_param))
+    // To find B-L, we need the log base 2 of hashes_in_target_time
+    let b_minus_l = hashes_in_target_time.log2().ceil() as usize;
+
+    // Apply reasonable bounds (4 ≤ B-L ≤ 23)
+    // This keeps maximum runtime under about 2 minutes on most systems
+    let b_minus_l_bounded = b_minus_l.clamp(4, 23);
+
+    // B = L + (B-L)
+    l_param + b_minus_l_bounded
 }
 
 impl Preset {
@@ -101,7 +111,10 @@ impl Preset {
             Preset::Medium => {
                 // Target ~10 seconds on this machine
                 let l = 4; // Keep at 16 flows for the toy demo
-                let b = calculate_b_param(hash_rate, l, 10.0); // Target 10 seconds
+                let target_seconds = 10.0;
+
+                // Calculate b needed for this target time
+                let b = calculate_b_param(hash_rate, l, target_seconds);
 
                 ColliderVmConfig {
                     n: 3,
@@ -114,13 +127,20 @@ impl Preset {
             Preset::Hard => {
                 // Target ~60 seconds on this machine
                 let l = 4; // Keep at 16 flows for the toy demo
-                let b = calculate_b_param(hash_rate, l, 60.0); // Target 60 seconds
+                let target_seconds = 30.0;
+
+                // Calculate b needed for this target time
+                let b = calculate_b_param(hash_rate, l, target_seconds);
+
+                // For Hard preset, intentionally make it 4x harder
+                // by adding 2 more bits (each bit doubles difficulty)
+                let b_harder = b + 2;
 
                 ColliderVmConfig {
                     n: 3,
                     m: 2,
                     l,
-                    b,
+                    b: b_harder,
                     k: 2,
                 }
             }
@@ -249,7 +269,7 @@ fn main() {
 
     // Format time in a more readable way
     let time_display = if estimated_seconds < 1.0 {
-        format!("less than 1 second")
+        "less than 1 second".to_string()
     } else if estimated_seconds < 60.0 {
         format!("{:.1} seconds", estimated_seconds)
     } else if estimated_seconds < 3600.0 {
