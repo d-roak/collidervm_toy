@@ -56,6 +56,7 @@ serial_test = "*"
 tqdm = "0.7"
 secp256k1 = { version = "0.29.1", features = ["global-context"] }
 derive_more = "2.0"
+indicatif = "0.17.11"
 
 [profile.dev]
 opt-level = 3
