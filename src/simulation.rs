@@ -234,7 +234,7 @@ pub fn online_execution(
         .get(&signer0_pubkey.to_bytes())
         .ok_or("Signature from signer 0 not found for step 1")?;
     let offchain_sig_f1_valid = secp
-        .verify_schnorr(signature_f1, &step_f1.sighash_message, &signer0_xonly)
+        .verify_schnorr(signature_f1, &step_f1.sighash_message, signer0_xonly)
         .is_ok();
 
     // Off-chain Sig check F2
@@ -244,7 +244,7 @@ pub fn online_execution(
         .get(&signer0_pubkey.to_bytes())
         .ok_or("Signature from signer 0 not found for step 2")?;
     let offchain_sig_f2_valid = secp
-        .verify_schnorr(signature_f2, &step_f2.sighash_message, &signer0_xonly)
+        .verify_schnorr(signature_f2, &step_f2.sighash_message, signer0_xonly)
         .is_ok();
 
     // Off-chain Hash prefix check
@@ -285,7 +285,7 @@ pub fn online_execution(
     // Create the final executable script from combined bytes
     let full_script_f1 = ScriptBuf::from_bytes(full_script_bytes_f1);
 
-    println!("Full Script F1: {}", full_script_f1.to_string());
+    println!("Full Script F1: {}", full_script_f1);
 
     let exec_result_f1 = execute_script_buf(full_script_f1.clone());
     let script_f1_success = exec_result_f1.success;
@@ -324,7 +324,7 @@ pub fn online_execution(
     // Create the final executable script from combined bytes
     let full_script_f2 = ScriptBuf::from_bytes(full_script_bytes_f2);
 
-    println!("Full Script F2: {}", full_script_f2.to_string());
+    println!("Full Script F2: {}", full_script_f2);
 
     let exec_result_f2 = execute_script_buf(full_script_f2.clone());
     let script_f2_success = exec_result_f2.success;
