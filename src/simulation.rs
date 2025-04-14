@@ -285,6 +285,8 @@ pub fn online_execution(
     // Create the final executable script from combined bytes
     let full_script_f1 = ScriptBuf::from_bytes(full_script_bytes_f1);
 
+    println!("Full Script F1: {}", full_script_f1.to_string());
+
     let exec_result_f1 = execute_script_buf(full_script_f1.clone());
     let script_f1_success = exec_result_f1.success;
     println!(
@@ -321,6 +323,8 @@ pub fn online_execution(
 
     // Create the final executable script from combined bytes
     let full_script_f2 = ScriptBuf::from_bytes(full_script_bytes_f2);
+
+    println!("Full Script F2: {}", full_script_f2.to_string());
 
     let exec_result_f2 = execute_script_buf(full_script_f2.clone());
     let script_f2_success = exec_result_f2.success;
