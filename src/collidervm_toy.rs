@@ -8,6 +8,8 @@ use blake3::Hasher;
 use secp256k1::{Keypair, Message, SecretKey, schnorr::Signature}; // Keep necessary secp types
 use std::collections::HashMap;
 
+const F1_THRESHOLD: u32 = 100;
+const F2_THRESHOLD: u32 = 200;
 // --- Configuration ---
 #[derive(Debug, Clone)]
 pub struct ColliderVmConfig {
@@ -60,10 +62,6 @@ pub struct PresignedFlow {
     /// Sequence of steps, e.g., [step_f1, step_f2]
     pub steps: Vec<PresignedStep>,
 }
-
-// --- Toy Function Constants ---
-pub const F1_THRESHOLD: u32 = 100;
-pub const F2_THRESHOLD: u32 = 200;
 
 // --- Hash Functions ---
 
@@ -178,76 +176,56 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
     }
 }
 
-/// Generates the script for F1(x): checks if x > F1_THRESHOLD.
-/// Assumes input x is pushed onto the stack before this script segment.
-pub fn script_f1_logic() -> ScriptBuf {
-    Builder::new()
-        .push_int(F1_THRESHOLD as i64)
-        .push_opcode(opcodes::all::OP_GREATERTHAN) // Check x > threshold
-        .push_opcode(opcodes::all::OP_VERIFY) // Fail if false
-        .into_script()
-}
-
-/// Generates the script for F2(x): checks if x < F2_THRESHOLD.
-/// Assumes input x is pushed onto the stack before this script segment.
-pub fn script_f2_logic() -> ScriptBuf {
-    Builder::new()
-        .push_int(F2_THRESHOLD as i64)
-        .push_opcode(opcodes::all::OP_LESSTHAN) // Check x < threshold
-        .push_opcode(opcodes::all::OP_VERIFY) // Fail if false
-        .into_script()
-}
-
-/// Generates the *complete locking script* for F1 including signature verification.
-/// Structure: Check Sig -> Check Hash Prefix -> Check F1 Logic
+/// Generates the *complete locking script* for F1.
+/// New Structure: Logic Check -> Hash Check -> Sig Check -> TRUE
 /// Returns the ScriptBuf.
 pub fn build_script_f1_locked(
-    signer_pubkey: &PublicKey, // Use bitcoin::PublicKey
+    signer_pubkey: &PublicKey,
     flow_id: u32,
     _b_bits: usize, // _b_bits is unused in this simplified version
 ) -> ScriptBuf {
-    // --- Witness stack expected: <signature> <hash_prefix> <input_x> ---
+    // --- Witness stack expected: <signature> <flow_id> <input_x> ---
     Builder::new()
-        // 1. Verify signature
-        .push_key(signer_pubkey) // Push the public key
-        .push_opcode(opcodes::all::OP_CHECKSIGVERIFY) // Check sig (consumes sig & key)
-        // Stack: <hash_prefix> <input_x>
-        // 2. Verify hash prefix (Simulated check - inline logic)
-        .push_int(flow_id as i64) // Push the expected flow_id
-        .push_opcode(opcodes::all::OP_EQUALVERIFY) // Check equality with pushed <hash_prefix>
-        // Stack: <input_x>
-        // 3. Check F1 logic: x > F1_THRESHOLD (inline logic)
+        // 3. Check F1 logic: x > F1_THRESHOLD (Consumes <input_x>)
         .push_int(F1_THRESHOLD as i64)
-        .push_opcode(opcodes::all::OP_GREATERTHAN) // Check x > threshold
-        .push_opcode(opcodes::all::OP_VERIFY) // Fail if false
+        .push_opcode(opcodes::all::OP_GREATERTHAN)
+        .push_opcode(opcodes::all::OP_VERIFY)
+        // Stack: <signature> <flow_id>
+        // 2. Verify hash prefix (Consumes <flow_id>)
+        .push_int(flow_id as i64) // Push the expected flow_id
+        .push_opcode(opcodes::all::OP_EQUALVERIFY)
+        // Stack: <signature>
+        // 1. Verify signature (Consumes <signature> and pushed <pubkey>)
+        .push_key(signer_pubkey)
+        .push_opcode(opcodes::all::OP_CHECKSIGVERIFY)
         // Stack: empty (if successful)
         // 4. Final success opcode
         .push_opcode(opcodes::OP_TRUE)
         .into_script()
 }
 
-/// Generates the *complete locking script* for F2 including signature verification.
-/// Structure: Check Sig -> Check Hash Prefix -> Check F2 Logic
+/// Generates the *complete locking script* for F2.
+/// New Structure: Logic Check -> Hash Check -> Sig Check -> TRUE
 /// Returns the ScriptBuf.
 pub fn build_script_f2_locked(
     signer_pubkey: &PublicKey,
     flow_id: u32,
     _b_bits: usize, // _b_bits is unused in this simplified version
 ) -> ScriptBuf {
-    // --- Witness stack expected: <signature> <hash_prefix> <input_x> ---
+    // --- Witness stack expected: <signature> <flow_id> <input_x> ---
     Builder::new()
-        // 1. Verify signature
+        // 3. Check F2 logic: x < F2_THRESHOLD (Consumes <input_x>)
+        .push_int(F2_THRESHOLD as i64)
+        .push_opcode(opcodes::all::OP_LESSTHAN)
+        .push_opcode(opcodes::all::OP_VERIFY)
+        // Stack: <signature> <flow_id>
+        // 2. Verify hash prefix (Consumes <flow_id>)
+        .push_int(flow_id as i64) // Push the expected flow_id
+        .push_opcode(opcodes::all::OP_EQUALVERIFY)
+        // Stack: <signature>
+        // 1. Verify signature (Consumes <signature> and pushed <pubkey>)
         .push_key(signer_pubkey)
         .push_opcode(opcodes::all::OP_CHECKSIGVERIFY)
-        // Stack: <hash_prefix> <input_x>
-        // 2. Verify hash prefix (Simulated check - inline logic)
-        .push_int(flow_id as i64) // Push the expected flow_id
-        .push_opcode(opcodes::all::OP_EQUALVERIFY) // Check equality with pushed <hash_prefix>
-        // Stack: <input_x>
-        // 3. Check F2 logic: x < F2_THRESHOLD (inline logic)
-        .push_int(F2_THRESHOLD as i64)
-        .push_opcode(opcodes::all::OP_LESSTHAN) // Check x < threshold
-        .push_opcode(opcodes::all::OP_VERIFY) // Fail if false
         // Stack: empty (if successful)
         // 4. Final success opcode
         .push_opcode(opcodes::OP_TRUE)
