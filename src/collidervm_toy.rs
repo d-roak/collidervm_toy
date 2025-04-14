@@ -1,7 +1,15 @@
-use bitcoin::{PublicKey, blockdata::script::ScriptBuf};
-use bitvm::{bigint::U256, treepp::script};
+use bitcoin::{
+    Amount, PublicKey, Transaction, XOnlyPublicKey,
+    blockdata::script::{Builder, ScriptBuf},
+    opcodes,
+};
+use bitcoin_hashes::{HashEngine, sha256};
 use blake3::Hasher;
+use secp256k1::{Keypair, Message, SecretKey, schnorr::Signature}; // Keep necessary secp types
+use std::collections::HashMap;
 
+const F1_THRESHOLD: u32 = 100;
+const F2_THRESHOLD: u32 = 200;
 // --- Configuration ---
 #[derive(Debug, Clone)]
 pub struct ColliderVmConfig {
@@ -13,214 +21,64 @@ pub struct ColliderVmConfig {
 }
 
 // --- Data Types ---
-pub type _InputX = Vec<u8>;
-pub type _NonceR = Vec<u8>;
+pub type _InputX = Vec<u8>; // Keeping alias for potential future use
+pub type _NonceR = Vec<u8>; // Keeping alias for potential future use
 
 // --- Actors ---
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SignerInfo {
     pub _id: usize,
     pub pubkey: PublicKey,
-    pub _privkey: secp256k1::SecretKey,
+    pub _privkey: SecretKey,
+    pub keypair: Keypair,
+    pub xonly: XOnlyPublicKey,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OperatorInfo {
     pub _id: usize,
     pub pubkey: PublicKey,
-    pub _privkey: secp256k1::SecretKey,
+    pub _privkey: SecretKey,
+}
+/// Represents a single step in a presigned flow (e.g., F1 or F2 execution)
+#[derive(Clone, Debug)]
+pub struct PresignedStep {
+    pub _tx_template: Transaction,
+    pub sighash_message: Message,
+    pub signatures: HashMap<Vec<u8>, Signature>,
+    pub locking_script: ScriptBuf,
 }
 
-// --- Toy Function Constants ---
-pub const F1_THRESHOLD: u32 = 100;
-pub const F2_THRESHOLD: u32 = 200;
-
-// --- Hash Functions ---
-
-/// Rust implementation of the Blake3 hash. Used for off-chain calculations.
-/// Takes arbitrary bytes, returns the 32-byte Blake3 hash.
-pub fn calculate_blake3_hash(data: &[u8]) -> [u8; 32] {
-    *blake3::hash(data).as_bytes()
+/// Represents a complete presigned flow for a specific flow_id 'd'
+#[derive(Clone, Debug)]
+pub struct PresignedFlow {
+    pub _flow_id: u32,
+    /// Sequence of steps, e.g., [step_f1, step_f2]
+    pub steps: Vec<PresignedStep>,
 }
 
-/// Alternate implementation that returns first 4 bytes as u32 (used for debugging)
-pub fn _collider_hash_blake3(x_bytes: &[u8]) -> u32 {
-    if x_bytes.len() != 4 {
-        eprintln!(
-            "ERROR: collider_hash_blake3 expects 4 bytes, got {}",
-            x_bytes.len()
-        );
-        return 0;
-    }
-    let mut hasher = Hasher::new();
-    hasher.update(x_bytes);
-    let hash_bytes = hasher.finalize();
-    // Extract the first 4 bytes and convert to u32 LE
-    let hash_prefix: [u8; 4] = hash_bytes.as_bytes()[0..4]
-        .try_into()
-        .expect("Blake3 hash is too short");
-    u32::from_le_bytes(hash_prefix)
+// --- Simplified Sighash Message Generation for Toy ---
+/// Creates a simplified message to be signed, representing the core commitment.
+/// In a real system, this uses the complex Bitcoin sighash rules.
+/// Here, we hash the locking script and output value as a proxy.
+pub fn create_toy_sighash_message(locking_script: &ScriptBuf, value: Amount) -> Message {
+    let mut engine = sha256::HashEngine::default();
+    engine.input(&locking_script.to_bytes());
+    engine.input(&value.to_sat().to_le_bytes());
+    let hash = sha256::Hash::from_engine(engine);
+    Message::from_digest(hash.to_byte_array())
 }
 
 // --- Script Generation Helpers ---
 
-/// Generates the script for F1(x): checks if x > F1_THRESHOLD.
-/// Assumes the stack top has: <F1_THRESHOLD> <x>
-/// Leaves 0x01 on stack if true, 0x00 otherwise.
-pub fn script_f1() -> ScriptBuf {
-    script! {
-        OP_GREATERTHAN
-        // No OP_VERIFY here, just return the boolean result
-    }
-    .compile()
-}
-
-/// Generates the script for F2(x): checks if x < F2_THRESHOLD.
-/// Assumes the stack top has: <F2_THRESHOLD> <x>
-/// Leaves 0x01 on stack if true, 0x00 otherwise.
-pub fn script_f2() -> ScriptBuf {
-    script! {
-        OP_LESSTHAN
-        // No OP_VERIFY here, just return the boolean result
-    }
-    .compile()
-}
-
-/// Returns a script that verifies the full 32-byte BLAKE3 output on the stack.
-/// Assumes the stack top contains the 64 limbs (nibbles) of the computed hash.
-/// Pops the 64 limbs and compares them with the provided `expected_output`.
-/// Leaves OP_TRUE (0x01) if verification succeeds.
-#[allow(dead_code)]
-pub fn blake3_verify_output_script(expected_output: [u8; 32]) -> ScriptBuf {
-    script! {
-        // Push the expected hash bytes (converted to limbs/nibbles)
-        for (i, byte) in expected_output.into_iter().enumerate() {
-            {byte} // Push the full byte
-            if i % 32 == 31 { // After every 32 bytes
-                {U256::transform_limbsize(8,4)} // Transform to nibbles
-            }
-        }
-        // Now the stack has: <computed_limbs> <expected_limbs>
-
-        // Verify all 64 limbs
-        for i in (2..65).rev() {
-            {i}
-            OP_ROLL
-            OP_EQUALVERIFY
-        }
-        OP_EQUAL
-    }
-    .compile()
-}
-
-/// Generates a script that verifies a signature against a public key.
-/// Assumes the stack has: <signature> <pubkey>
-/// Leaves 0x01 on stack if verification succeeds, fails otherwise.
-#[allow(dead_code)]
-pub fn script_check_signature() -> ScriptBuf {
-    script! {
-        OP_CHECKSIG
-    }
-    .compile()
-}
-
-/// Generates a Bitcoin script to check H(x,r)|B = d
-/// This is the flow selection mechanism from the ColliderVM paper
-/// Returns a script that checks if the first B bits of H(x,r) match d
-#[allow(dead_code)]
-pub fn script_check_hash_prefix(flow_id: u32, _b_bits: usize) -> ScriptBuf {
-    // In a real implementation, this would check if the first b_bits of H(x,r) equal flow_id
-    // For simplicity in our toy implementation, we'll just do a direct comparison
-    // assuming x and r are on the stack
-
-    script! {
-        // The full H(x,r) calculation would go here
-        // In a real implementation, we'd compute the hash and check if B bits match flow_id
-
-        // For toy simulation, since we're not actually implementing the hash calculation in script,
-        // we'll just push a constant and check against flow_id
-        <flow_id>
-        OP_EQUALVERIFY
-    }
-    .compile()
-}
-
-/// Generates the complete F1 script with signature verification
-/// Takes a signer public key and the flow ID to generate a script that:
-/// 1. Verifies the signature against the signer's public key
-/// 2. Verifies that the input hash matches the flow ID
-/// 3. Checks if x > F1_THRESHOLD
-pub fn script_f1_with_signature(
-    signer_pubkey: &PublicKey,
-    flow_id: u32,
-    _b_bits: usize,
-) -> ScriptBuf {
-    let signer_pubkey_bytes = signer_pubkey.to_bytes();
-
-    script! {
-        // Stack: <signature> <x> <r> ...
-
-        // 1. Verify signature (signature is at the top of the stack)
-        <signer_pubkey_bytes>
-        OP_CHECKSIGVERIFY
-
-        // 2. Verify hash prefix (check that H(x,r)|B = flow_id)
-        // In a real implementation, we'd duplicate x and r, compute H(x,r)|B and check against flow_id
-        <flow_id>
-        OP_EQUALVERIFY
-
-        // 3. Check F1: x > F1_THRESHOLD
-        // Stack: <x> ...
-        <F1_THRESHOLD>
-        OP_GREATERTHAN
-        // Result left on stack: 0x01 if x > F1_THRESHOLD, 0x00 otherwise
-    }
-    .compile()
-}
-
-/// Generates the complete F2 script with signature verification
-/// Takes a signer public key and the flow ID to generate a script that:
-/// 1. Verifies the signature against the signer's public key
-/// 2. Verifies that the input hash matches the flow ID
-/// 3. Checks if x < F2_THRESHOLD
-pub fn script_f2_with_signature(
-    signer_pubkey: &PublicKey,
-    flow_id: u32,
-    _b_bits: usize,
-) -> ScriptBuf {
-    let signer_pubkey_bytes = signer_pubkey.to_bytes();
-
-    script! {
-        // Stack: <signature> <x> <r> ...
-
-        // 1. Verify signature (signature is at the top of the stack)
-        <signer_pubkey_bytes>
-        OP_CHECKSIGVERIFY
-
-        // 2. Verify hash prefix (check that H(x,r)|B = flow_id)
-        // In a real implementation, we'd duplicate x and r, compute H(x,r)|B and check against flow_id
-        <flow_id>
-        OP_EQUALVERIFY
-
-        // 3. Check F2: x < F2_THRESHOLD
-        // Stack: <x> ...
-        <F2_THRESHOLD>
-        OP_LESSTHAN
-        // Result left on stack: 0x01 if x < F2_THRESHOLD, 0x00 otherwise
-    }
-    .compile()
-}
-
-/// Calculate flow ID from input and nonce
-/// This simulates H(x,r)|B to find which flow to use
-pub fn calculate_flow_id(input: u32, nonce: u64, b_bits: usize, l_bits: usize) -> u32 {
-    // In a real implementation, this would calculate H(x,r) and return the first B bits
-    // Also check if the result is in the set D (size 2^L)
-
-    // For the toy implementation, we'll use a simplified approach:
-    // Calculate a hash of input and nonce, take the first b_bits,
-    // and ensure it's in range [0, 2^l_bits - 1]
-
+/// Calculate flow ID from input and nonce (Off-chain logic)
+/// Simulates H(x,r)|B to find which flow to use.
+pub fn calculate_flow_id(
+    input: u32,
+    nonce: u64,
+    b_bits: usize,
+    l_bits: usize,
+) -> Result<u32, String> {
     let mut hasher = Hasher::new();
     hasher.update(&input.to_le_bytes());
     hasher.update(&nonce.to_le_bytes());
@@ -231,60 +89,131 @@ pub fn calculate_flow_id(input: u32, nonce: u64, b_bits: usize, l_bits: usize) -
     bytes.copy_from_slice(&hash.as_bytes()[0..4]);
     let hash_u32 = u32::from_le_bytes(bytes);
 
-    // Take only b_bits and ensure it's in range [0, 2^l_bits - 1]
+    // Create a mask for the first B bits
     let mask_b = if b_bits >= 32 {
         0xFFFFFFFF
     } else {
         (1 << b_bits) - 1
     };
-    let mask_l = if l_bits >= 32 {
-        0xFFFFFFFF
-    } else {
-        (1 << l_bits) - 1
-    };
+    // Apply the mask to get the B-bit prefix
+    let prefix_b = hash_u32 & mask_b;
 
-    (hash_u32 & mask_b) & mask_l
+    // Check if the B-bit prefix is within the allowed range [0, 2^L - 1]
+    let max_flow_id = (1u64 << l_bits) as u32; // Calculate 2^L
+    if prefix_b < max_flow_id {
+        Ok(prefix_b)
+    } else {
+        // Indicate that this hash doesn't map to a valid flow ID in D
+        Err(format!(
+            "Hash prefix {} is outside range [0, {})",
+            prefix_b, max_flow_id
+        ))
+    }
 }
 
-/// Find a valid nonce for a given input that produces a valid flow ID
-/// This simulates the operator finding a nonce r such that H(x,r)|B ∈ D
-pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> (u64, u32) {
-    // Start with nonce 0 and increment until we find a valid flow ID
+/// Find a valid nonce for a given input that produces a flow ID in D (Off-chain logic)
+/// Simulates the operator finding a nonce r such that H(x,r)|B ∈ D.
+pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64, u32), String> {
     let mut nonce: u64 = 0;
-    let max_attempts = if (b_bits - l_bits) < 30 {
-        1 << (b_bits - l_bits)
-    } else {
-        1_000_000
-    };
+    // Calculate expected number of attempts (2^(B-L)) for progress reporting
+    let expected_attempts: u64 = 1u64
+        .checked_shl((b_bits - l_bits) as u32)
+        .unwrap_or(u64::MAX);
+    let report_interval = (expected_attempts / 10).max(100_000); // Report progress periodically
 
     println!(
-        "Finding valid nonce (expected work: 2^{} = {} hashes)...",
+        "Finding valid nonce (L={}, B={})... (Expected work: ~2^{} = {} hashes)",
+        l_bits,
+        b_bits,
         b_bits - l_bits,
-        max_attempts
+        expected_attempts
     );
 
-    for i in 0..max_attempts {
-        let flow_id = calculate_flow_id(input, nonce, b_bits, l_bits);
-        if i % 100_000 == 0 {
-            println!("  Tried {} hashes...", i);
+    loop {
+        match calculate_flow_id(input, nonce, b_bits, l_bits) {
+            Ok(flow_id) => {
+                // Found a nonce that maps to a valid flow ID
+                println!(
+                    "  Found valid nonce {} -> flow_id {} after {} hashes.",
+                    nonce,
+                    flow_id,
+                    nonce + 1 // nonce starts at 0
+                );
+                return Ok((nonce, flow_id));
+            }
+            Err(_) => {
+                // Hash prefix was outside the valid range, continue searching
+                if nonce % report_interval == 0 && nonce > 0 {
+                    println!("  Tried {} hashes...", nonce);
+                }
+                nonce = nonce
+                    .checked_add(1)
+                    .ok_or_else(|| "Nonce overflowed".to_string())?;
+                // Optional: Add a safety break after an excessive number of attempts
+                if nonce > expected_attempts.saturating_mul(100) {
+                    // e.g., 100x expected work
+                    return Err(format!(
+                        "Could not find a valid nonce after {} attempts (expected ~{})",
+                        nonce, expected_attempts
+                    ));
+                }
+            }
         }
-
-        // In real implementation, we'd check if flow_id ∈ D
-        // For toy implementation, any flow_id in range [0, 2^l_bits - 1] is valid
-        if flow_id < (1 << l_bits) {
-            println!("  Found valid nonce {} after {} hashes", nonce, i);
-            return (nonce, flow_id);
-        }
-
-        nonce += 1;
     }
+}
 
-    // If no valid nonce found after max_attempts, just return the last one
-    // This shouldn't happen with reasonable parameters
-    println!(
-        "  No valid nonce found after {} attempts, using last one",
-        max_attempts
-    );
-    let flow_id = calculate_flow_id(input, nonce, b_bits, l_bits);
-    (nonce, flow_id)
+/// Generates the *complete locking script* for F1.
+/// New Structure: Logic Check -> Hash Check -> Sig Check -> TRUE
+/// Returns the ScriptBuf.
+pub fn build_script_f1_locked(
+    signer_pubkey: &PublicKey,
+    flow_id: u32,
+    _b_bits: usize, // _b_bits is unused in this simplified version
+) -> ScriptBuf {
+    // --- Witness stack expected: <signature> <flow_id> <input_x> ---
+    Builder::new()
+        // 3. Check F1 logic: x > F1_THRESHOLD (Consumes <input_x>)
+        .push_int(F1_THRESHOLD as i64)
+        .push_opcode(opcodes::all::OP_GREATERTHAN)
+        .push_opcode(opcodes::all::OP_VERIFY)
+        // Stack: <signature> <flow_id>
+        // 2. Verify hash prefix (Consumes <flow_id>)
+        .push_int(flow_id as i64) // Push the expected flow_id
+        .push_opcode(opcodes::all::OP_EQUALVERIFY)
+        // Stack: <signature>
+        // 1. Verify signature (Consumes <signature> and pushed <pubkey>)
+        .push_key(signer_pubkey)
+        .push_opcode(opcodes::all::OP_CHECKSIGVERIFY)
+        // Stack: empty (if successful)
+        // 4. Final success opcode
+        .push_opcode(opcodes::OP_TRUE)
+        .into_script()
+}
+
+/// Generates the *complete locking script* for F2.
+/// New Structure: Logic Check -> Hash Check -> Sig Check -> TRUE
+/// Returns the ScriptBuf.
+pub fn build_script_f2_locked(
+    signer_pubkey: &PublicKey,
+    flow_id: u32,
+    _b_bits: usize, // _b_bits is unused in this simplified version
+) -> ScriptBuf {
+    // --- Witness stack expected: <signature> <flow_id> <input_x> ---
+    Builder::new()
+        // 3. Check F2 logic: x < F2_THRESHOLD (Consumes <input_x>)
+        .push_int(F2_THRESHOLD as i64)
+        .push_opcode(opcodes::all::OP_LESSTHAN)
+        .push_opcode(opcodes::all::OP_VERIFY)
+        // Stack: <signature> <flow_id>
+        // 2. Verify hash prefix (Consumes <flow_id>)
+        .push_int(flow_id as i64) // Push the expected flow_id
+        .push_opcode(opcodes::all::OP_EQUALVERIFY)
+        // Stack: <signature>
+        // 1. Verify signature (Consumes <signature> and pushed <pubkey>)
+        .push_key(signer_pubkey)
+        .push_opcode(opcodes::all::OP_CHECKSIGVERIFY)
+        // Stack: empty (if successful)
+        // 4. Final success opcode
+        .push_opcode(opcodes::OP_TRUE)
+        .into_script()
 }
