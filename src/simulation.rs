@@ -2,21 +2,23 @@ use std::{collections::HashMap, error::Error};
 
 use bitcoin::{
     Amount, OutPoint, PublicKey, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
-    blockdata::script::ScriptBuf,
+    blockdata::script::{Builder, ScriptBuf},
+    script::PushBytesBuf,
 };
-use secp256k1::{Keypair, Secp256k1}; // For signing/verification
+use bitvm::{self, execute_script_buf};
+use secp256k1::{self, Keypair, Secp256k1};
 
 use crate::collidervm_toy::{
-    ColliderVmConfig, F1_THRESHOLD, F2_THRESHOLD, OperatorInfo, PresignedFlow, PresignedStep,
-    SignerInfo, build_script_f1_locked, build_script_f2_locked, calculate_flow_id,
-    create_toy_sighash_message, find_valid_nonce,
+    ColliderVmConfig, OperatorInfo, PresignedFlow, PresignedStep, SignerInfo,
+    build_script_f1_locked, build_script_f2_locked, calculate_flow_id, create_toy_sighash_message,
+    find_valid_nonce,
 };
 
 // --- Simulation Structures ---
 pub struct SimulationResult {
     pub success: bool,
-    pub _f1_result: bool, // Made public for clarity
-    pub _f2_result: bool, // Made public for clarity
+    pub f1_result: bool,
+    pub f2_result: bool,
     pub message: String,
 }
 
@@ -75,9 +77,9 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
         let keypair = Keypair::from_secret_key(&secp, &privkey);
         let (xonly, _parity) = keypair.x_only_public_key();
         let signer = SignerInfo {
-            _id: i,
+            id: i,
             pubkey: PublicKey::new(secp_pubkey),
-            _privkey: privkey,
+            privkey: privkey,
             keypair,
             xonly,
         };
@@ -89,9 +91,9 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
     for i in 0..config.m {
         let (privkey, secp_pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let operator = OperatorInfo {
-            _id: i,
+            id: i,
             pubkey: PublicKey::new(secp_pubkey),
-            _privkey: privkey,
+            privkey: privkey,
         };
         println!("  Generated Operator {}: {}", i, operator.pubkey);
         operators.push(operator);
@@ -141,10 +143,10 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
 
         // 1e. Create Presigned Step for F1
         steps.push(PresignedStep {
-            _tx_template: tx_f1_template.clone(), // Store the template
+            tx_template: tx_f1_template.clone(),
             sighash_message: sighash_msg_f1,
             signatures: signatures_f1,
-            _locking_script: script_f1,
+            locking_script: script_f1,
         });
 
         // --- Presign Step 2 (F2) ---
@@ -163,20 +165,14 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
             signatures_f2.insert(signer.pubkey.to_bytes(), signature);
         }
         steps.push(PresignedStep {
-            _tx_template: tx_f2_template,
+            tx_template: tx_f2_template,
             sighash_message: sighash_msg_f2,
             signatures: signatures_f2,
-            _locking_script: script_f2,
+            locking_script: script_f2,
         });
 
         // Add the fully signed flow to the map
-        presigned_flows_map.insert(
-            flow_id,
-            PresignedFlow {
-                _flow_id: flow_id,
-                steps,
-            },
-        );
+        presigned_flows_map.insert(flow_id, PresignedFlow { flow_id, steps });
 
         if flow_id % 4 == 3 || flow_id == num_flows as u32 - 1 {
             println!("  Created and presigned flow {}...", flow_id);
@@ -192,10 +188,10 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
 }
 
 /// Simulates the online execution phase of ColliderVM.
-/// Finds nonce, selects flow, verifies signatures, checks hash prefix, executes logic.
+/// Finds nonce, selects flow, executes the full presigned locking scripts.
 pub fn online_execution(
-    signers: &[SignerInfo],      // Needed to get the public key for verification
-    _operators: &[OperatorInfo], // Not used directly in this simplified online phase
+    signers: &[SignerInfo],
+    _operators: &[OperatorInfo],
     presigned_flows_map: &HashMap<u32, PresignedFlow>,
     config: &ColliderVmConfig,
     input_value: u32,
@@ -226,147 +222,149 @@ pub fn online_execution(
     })?;
     println!("Retrieved presigned flow {}", flow_id);
 
-    // Secp256k1 context for verification
-    let secp = Secp256k1::verification_only(); // Use verification context
-
-    // --- Simulate Step 1 (F1) Execution ---
-    println!("\nSimulating Execution Step 1 (F1)...");
-    let step_f1 = &presigned_flow.steps[0];
-
-    // 1a. Verify Signature (Off-chain simulation)
+    // --- Off-chain checks (for logging/comparison only) ---
+    let secp = Secp256k1::verification_only();
     let signer0_pubkey = &signers[0].pubkey;
     let signer0_xonly = &signers[0].xonly;
+
+    // Off-chain Sig check F1
+    let step_f1 = &presigned_flow.steps[0];
     let signature_f1 = step_f1
         .signatures
         .get(&signer0_pubkey.to_bytes())
         .ok_or("Signature from signer 0 not found for step 1")?;
-    let signature_f1_valid = secp
-        .verify_schnorr(signature_f1, &step_f1.sighash_message, signer0_xonly)
+    let offchain_sig_f1_valid = secp
+        .verify_schnorr(signature_f1, &step_f1.sighash_message, &signer0_xonly)
         .is_ok();
-    println!(
-        "  Signature Check (Signer 0): {}",
-        if signature_f1_valid {
-            "PASSED ✅"
-        } else {
-            "FAILED ❌"
-        }
-    );
 
-    // 1b. Verify Hash Prefix (Off-chain simulation)
-    // This checks if the (input, nonce) pair indeed produces the required flow_id
-    let hash_prefix_valid =
-        calculate_flow_id(input_value, nonce, config.b, config.l) == Ok(flow_id);
-    println!(
-        "  Hash Prefix Check (H(x,r)|B == d): {}",
-        if hash_prefix_valid {
-            "PASSED ✅"
-        } else {
-            "FAILED ❌"
-        }
-    );
-
-    // 1c. Verify Function Logic (Off-chain simulation)
-    // The actual script execution is not simulated here anymore. We just check the condition.
-    let logic_f1_valid = input_value > F1_THRESHOLD;
-    println!(
-        "  Function Logic Check (F1: x > {}): {}",
-        F1_THRESHOLD,
-        if logic_f1_valid {
-            "PASSED ✅"
-        } else {
-            "FAILED ❌"
-        }
-    );
-
-    let f1_step_success = signature_f1_valid && hash_prefix_valid && logic_f1_valid;
-    println!(
-        "  Step 1 Overall: {}",
-        if f1_step_success {
-            "SUCCESS"
-        } else {
-            "FAILURE"
-        }
-    );
-
-    // --- Simulate Step 2 (F2) Execution ---
-    println!("\nSimulating Execution Step 2 (F2)...");
+    // Off-chain Sig check F2
     let step_f2 = &presigned_flow.steps[1];
-
-    // 2a. Verify Signature (Signer 0) (Off-chain simulation)
     let signature_f2 = step_f2
         .signatures
         .get(&signer0_pubkey.to_bytes())
         .ok_or("Signature from signer 0 not found for step 2")?;
-    let signature_f2_valid = secp
-        .verify_schnorr(signature_f2, &step_f2.sighash_message, signer0_xonly)
+    let offchain_sig_f2_valid = secp
+        .verify_schnorr(signature_f2, &step_f2.sighash_message, &signer0_xonly)
         .is_ok();
+
+    // Off-chain Hash prefix check
+    let offchain_hash_prefix_valid =
+        calculate_flow_id(input_value, nonce, config.b, config.l) == Ok(flow_id);
+    println!("\n--- Off-Chain Check Results (Informational) ---");
     println!(
-        "  Signature Check (Signer 0): {}",
-        if signature_f2_valid {
+        "  Signature F1 Valid (off-chain): {}",
+        offchain_sig_f1_valid
+    );
+    println!(
+        "  Signature F2 Valid (off-chain): {}",
+        offchain_sig_f2_valid
+    );
+    println!(
+        "  Hash Prefix Valid (off-chain): {}",
+        offchain_hash_prefix_valid
+    );
+    println!("---------------------------------------------");
+
+    // --- Execute Full Script Step 1 (F1) ---
+    println!("\nExecuting Full Script Step 1 (F1 - Flow {})...", flow_id);
+    // Build the witness script part: <signature> <hash_prefix> <input_x>
+    let witness_script_f1 = {
+        let mut builder = Builder::new();
+        let sig_bytes = PushBytesBuf::try_from(signature_f1.as_ref().to_vec())
+            .expect("Cannot convert signature to bytes");
+        builder = builder.push_slice(sig_bytes);
+        builder = builder.push_int(flow_id as i64); // Push hash_prefix (flow_id)
+        builder = builder.push_int(input_value as i64); // Push input_x
+        builder.into_script()
+    };
+
+    // Concatenate witness script bytes and locking script bytes
+    let mut full_script_bytes_f1 = witness_script_f1.to_bytes();
+    full_script_bytes_f1.extend(step_f1.locking_script.to_bytes());
+
+    // Create the final executable script from combined bytes
+    let full_script_f1 = ScriptBuf::from_bytes(full_script_bytes_f1);
+
+    let exec_result_f1 = execute_script_buf(full_script_f1.clone());
+    let script_f1_success = exec_result_f1.success;
+    println!(
+        "  => Full Script F1 Execution Result: {} (Result: {:?})",
+        if script_f1_success {
             "PASSED ✅"
         } else {
             "FAILED ❌"
-        }
+        },
+        exec_result_f1
     );
+    if !script_f1_success {
+        println!(
+            "     (Note: Failure might be due to OP_CHECKSIGVERIFY with toy signature/sighash)"
+        );
+    }
 
-    // 2b. Verify Hash Prefix (remains the same check) (Off-chain simulation)
+    // --- Execute Full Script Step 2 (F2) ---
+    println!("\nExecuting Full Script Step 2 (F2 - Flow {})...", flow_id);
+    // Build the witness script part: <signature> <hash_prefix> <input_x>
+    let witness_script_f2 = {
+        let mut builder = Builder::new();
+        let sig_bytes =
+            PushBytesBuf::try_from(signature_f2.as_ref().to_vec()).expect("Signature is too long");
+        builder = builder.push_slice(sig_bytes);
+        builder = builder.push_int(flow_id as i64);
+        builder = builder.push_int(input_value as i64);
+        builder.into_script()
+    };
+
+    // Concatenate witness script bytes and locking script bytes
+    let mut full_script_bytes_f2 = witness_script_f2.to_bytes();
+    full_script_bytes_f2.extend(step_f2.locking_script.to_bytes());
+
+    // Create the final executable script from combined bytes
+    let full_script_f2 = ScriptBuf::from_bytes(full_script_bytes_f2);
+
+    let exec_result_f2 = execute_script_buf(full_script_f2.clone());
+    let script_f2_success = exec_result_f2.success;
     println!(
-        "  Hash Prefix Check (H(x,r)|B == d): {}",
-        if hash_prefix_valid {
+        "  => Full Script F2 Execution Result: {} (Result: {:?})",
+        if script_f2_success {
             "PASSED ✅"
         } else {
             "FAILED ❌"
-        }
-    ); // Re-use previous check result
-
-    // 2c. Verify Function Logic (F2) (Off-chain simulation)
-    let logic_f2_valid = input_value < F2_THRESHOLD;
-    println!(
-        "  Function Logic Check (F2: x < {}): {}",
-        F2_THRESHOLD,
-        if logic_f2_valid {
-            "PASSED ✅"
-        } else {
-            "FAILED ❌"
-        }
+        },
+        exec_result_f2
     );
+    if !script_f2_success {
+        println!(
+            "     (Note: Failure might be due to OP_CHECKSIGVERIFY with toy signature/sighash)"
+        );
+    }
 
-    let f2_step_success = signature_f2_valid && hash_prefix_valid && logic_f2_valid;
-    println!(
-        "  Step 2 Overall: {}",
-        if f2_step_success {
-            "SUCCESS"
-        } else {
-            "FAILURE"
-        }
-    );
-
-    // Determine overall simulation success
-    let overall_success = f1_step_success && f2_step_success;
+    // Determine overall simulation success based *only* on the full script executions
+    let overall_success = script_f1_success && script_f2_success;
     println!("\n--- Execution Complete ---");
 
     // Create and return the simulation result
     let result_message = if overall_success {
         format!(
-            "Successfully verified input {} satisfies all conditions (Sig, Hash Prefix, F1, F2) using flow {}",
+            "Successfully executed full F1 & F2 scripts for input {} using flow {}.",
             input_value, flow_id
         )
     } else {
         format!(
-            "Input {} failed conditions for flow {}. F1 Step Success: {}, F2 Step Success: {}",
-            input_value, flow_id, f1_step_success, f2_step_success
+            "Execution of full scripts failed for input {} using flow {}. F1 Script Success: {}, F2 Script Success: {}",
+            input_value, flow_id, script_f1_success, script_f2_success
         )
     };
 
     Ok(SimulationResult {
         success: overall_success,
-        _f1_result: f1_step_success,
-        _f2_result: f2_step_success,
+        f1_result: script_f1_success, // Store full script execution results
+        f2_result: script_f2_success,
         message: result_message,
     })
 }
 
-/// Orchestrates the complete ColliderVM simulation (unchanged)
+/// Orchestrates the complete ColliderVM simulation
 pub fn run_simulation(
     config: ColliderVmConfig,
     input_value: u32,
@@ -375,6 +373,7 @@ pub fn run_simulation(
     let (signers, operators, presigned_flows) = offline_setup(&config)?;
 
     // Step 2: Online Execution
+    // Pass signers and operators even if not used in this simplified execution
     let result = online_execution(&signers, &operators, &presigned_flows, &config, input_value)?;
 
     // Step 3: Report Results

@@ -3,7 +3,7 @@ use bitcoin::{
     blockdata::script::{Builder, ScriptBuf},
     opcodes,
 };
-use bitcoin_hashes::{HashEngine, sha256};
+use bitcoin_hashes::{Hash as BitcoinHashTrait, HashEngine, sha256};
 use blake3::Hasher;
 use secp256k1::{Keypair, Message, SecretKey, schnorr::Signature}; // Keep necessary secp types
 use std::collections::HashMap;
@@ -25,38 +25,38 @@ pub type _NonceR = Vec<u8>; // Keeping alias for potential future use
 // --- Actors ---
 #[derive(Debug, Clone)]
 pub struct SignerInfo {
-    pub _id: usize,
+    pub id: usize,
     pub pubkey: PublicKey,
-    pub _privkey: SecretKey,
+    pub privkey: SecretKey,
     pub keypair: Keypair,
     pub xonly: XOnlyPublicKey,
 }
 
 #[derive(Debug, Clone)]
 pub struct OperatorInfo {
-    pub _id: usize,
+    pub id: usize,
     pub pubkey: PublicKey,
-    pub _privkey: SecretKey,
+    pub privkey: SecretKey,
 }
 /// Represents a single step in a presigned flow (e.g., F1 or F2 execution)
 #[derive(Clone, Debug)]
 pub struct PresignedStep {
     /// Placeholder for the transaction structure committed to during signing.
     /// For the toy, this might be simplified.
-    pub _tx_template: Transaction,
+    pub tx_template: Transaction,
     /// The actual sighash message that was signed by the signers.
     pub sighash_message: Message,
     /// Map from Signer's PublicKey (as bytes for HashMap key) to their Schnorr signature.
     pub signatures: HashMap<Vec<u8>, Signature>,
     /// The scriptPubKey that enforces the logic (sig check, hash check, function check).
     /// This is embedded in tx_template.output[.].script_pubkey.
-    pub _locking_script: ScriptBuf,
+    pub locking_script: ScriptBuf,
 }
 
 /// Represents a complete presigned flow for a specific flow_id 'd'
 #[derive(Clone, Debug)]
 pub struct PresignedFlow {
-    pub _flow_id: u32,
+    pub flow_id: u32,
     /// Sequence of steps, e.g., [step_f1, step_f2]
     pub steps: Vec<PresignedStep>,
 }
@@ -69,7 +69,7 @@ pub const F2_THRESHOLD: u32 = 200;
 
 /// Rust implementation of the Blake3 hash. Used for off-chain calculations.
 /// Takes arbitrary bytes, returns the 32-byte Blake3 hash.
-pub fn _calculate_blake3_hash(data: &[u8]) -> [u8; 32] {
+pub fn calculate_blake3_hash(data: &[u8]) -> [u8; 32] {
     *blake3::hash(data).as_bytes()
 }
 
@@ -176,6 +176,26 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
             }
         }
     }
+}
+
+/// Generates the script for F1(x): checks if x > F1_THRESHOLD.
+/// Assumes input x is pushed onto the stack before this script segment.
+pub fn script_f1_logic() -> ScriptBuf {
+    Builder::new()
+        .push_int(F1_THRESHOLD as i64)
+        .push_opcode(opcodes::all::OP_GREATERTHAN) // Check x > threshold
+        .push_opcode(opcodes::all::OP_VERIFY) // Fail if false
+        .into_script()
+}
+
+/// Generates the script for F2(x): checks if x < F2_THRESHOLD.
+/// Assumes input x is pushed onto the stack before this script segment.
+pub fn script_f2_logic() -> ScriptBuf {
+    Builder::new()
+        .push_int(F2_THRESHOLD as i64)
+        .push_opcode(opcodes::all::OP_LESSTHAN) // Check x < threshold
+        .push_opcode(opcodes::all::OP_VERIFY) // Fail if false
+        .into_script()
 }
 
 /// Generates the *complete locking script* for F1 including signature verification.
