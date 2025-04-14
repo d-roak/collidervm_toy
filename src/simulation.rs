@@ -239,6 +239,8 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
 ///
 /// Refer to Section 2.1 and Figure 2 of the ColliderVM paper.
 ///
+/// The expected witness stack is: `<signature> <flow_id> <input_x>` (integers)
+///
 /// # Arguments
 /// * `signers` - Slice of `SignerInfo` generated during setup.
 /// * `_operators` - Slice of `OperatorInfo` (unused in this simplified online phase simulation).
@@ -262,7 +264,6 @@ pub fn online_execution(
         config.l, config.b, config.k, config.n, config.m
     );
     println!("Input value (x): {}", input_value);
-
     // 1. Operator finds a valid nonce `r` and corresponding flow ID `d`
     let (nonce, flow_id) = match find_valid_nonce(input_value, config.b, config.l) {
         Ok(result) => result,
@@ -279,6 +280,7 @@ pub fn online_execution(
     // 2. Retrieve the PresignedFlow for the calculated flow ID `d`
     let presigned_flow = presigned_flows_map.get(&flow_id).ok_or_else(|| {
         // This should ideally not happen if nonce finding guarantees a valid flow ID
+
         format!(
             "Critical Error: Presigned flow d={} not found after nonce search!",
             flow_id
@@ -300,7 +302,7 @@ pub fn online_execution(
         .get(&signer0_pubkey.to_bytes())
         .ok_or("Signature from signer 0 not found for F1 step")?;
     let offchain_sig_f1_valid = secp
-        .verify_schnorr(signature_f1, &step_f1.sighash_message, &signer0_xonly)
+        .verify_schnorr(signature_f1, &step_f1.sighash_message, signer0_xonly)
         .is_ok();
 
     // Off-chain check of Signer 0's signature for F2
@@ -310,7 +312,7 @@ pub fn online_execution(
         .get(&signer0_pubkey.to_bytes())
         .ok_or("Signature from signer 0 not found for F2 step")?;
     let offchain_sig_f2_valid = secp
-        .verify_schnorr(signature_f2, &step_f2.sighash_message, &signer0_xonly)
+        .verify_schnorr(signature_f2, &step_f2.sighash_message, signer0_xonly)
         .is_ok();
 
     // Off-chain check of the hash prefix calculation H(x, r)|_B = d
@@ -326,15 +328,16 @@ pub fn online_execution(
     );
     println!("---------------------------------------------");
 
-    // --- 3. & 4. Construct and Execute Full Script for Step F1 ---
+    // --- Construct and Execute Full Script for Step F1 ---
     println!("\nExecuting Full Script Step F1 (Flow d={})...", flow_id);
 
-    // Construct the witness for F1: <signature> <flow_id> <input_x>
+    // Construct the witness for F1 (Simplified): <signature> <flow_id> <input_x>
     let witness_script_f1 = {
         let mut builder = Builder::new();
         // Push Signer 0's signature
         let sig_bytes = PushBytesBuf::try_from(signature_f1.as_ref().to_vec())
             .expect("Signature F1 is too long for push");
+
         builder = builder.push_slice(sig_bytes);
         // Push the flow ID `d` (which is the hash prefix)
         builder = builder.push_int(flow_id as i64);
@@ -343,14 +346,13 @@ pub fn online_execution(
         builder.into_script()
     };
 
-    // Combine witness script and locking script
+    // Combine witness and locking script
     let mut full_script_bytes_f1 = witness_script_f1.to_bytes();
     full_script_bytes_f1.extend(step_f1.locking_script.to_bytes());
     let full_script_f1 = ScriptBuf::from_bytes(full_script_bytes_f1);
-
     println!("Full Script F1: {}", full_script_f1);
 
-    // Execute the combined script using bitvm executor
+    // Execute F1 script
     let exec_result_f1 = execute_script_buf(full_script_f1.clone());
     let script_f1_success = exec_result_f1.success;
     println!(
@@ -360,20 +362,18 @@ pub fn online_execution(
         } else {
             "FAILED ❌"
         },
-        exec_result_f1 // Includes potential error messages
+        exec_result_f1
     );
     if !script_f1_success {
-        // Note: Failure might be due to OP_CHECKSIGVERIFY in the toy setup, as
-        // `execute_script_buf` doesn't perform real crypto verification.
         println!(
             "     (Toy Note: Failure might be due to OP_CHECKSIGVERIFY; script logic might still be correct)"
         );
     }
 
-    // --- 3. & 4. Construct and Execute Full Script for Step F2 ---
+    // --- Construct and Execute Full Script for Step F2 ---
     println!("\nExecuting Full Script Step F2 (Flow d={})...", flow_id);
 
-    // Construct the witness for F2: <signature> <flow_id> <input_x>
+    // Construct the witness for F2 (Simplified): <signature> <flow_id> <input_x>
     let witness_script_f2 = {
         let mut builder = Builder::new();
         // Push Signer 0's signature
@@ -387,14 +387,13 @@ pub fn online_execution(
         builder.into_script()
     };
 
-    // Combine witness script and locking script
+    // Combine witness and locking script
     let mut full_script_bytes_f2 = witness_script_f2.to_bytes();
     full_script_bytes_f2.extend(step_f2.locking_script.to_bytes());
     let full_script_f2 = ScriptBuf::from_bytes(full_script_bytes_f2);
-
     println!("Full Script F2: {}", full_script_f2);
 
-    // Execute the combined script
+    // Execute F2 script
     let exec_result_f2 = execute_script_buf(full_script_f2.clone());
     let script_f2_success = exec_result_f2.success;
     println!(
@@ -412,20 +411,19 @@ pub fn online_execution(
         );
     }
 
-    // 5. Determine Overall Simulation Success
-    // In this toy model, success requires both F1 and F2 scripts to pass execution.
+    // Determine Overall Simulation Success
     let overall_success = script_f1_success && script_f2_success;
     println!("\n--- Execution Complete ---");
 
     // Create the final simulation result message
     let result_message = if overall_success {
         format!(
-            "Successfully executed full F1 & F2 scripts for input x={} using flow d={}.",
+            "Successfully executed simplified F1 & F2 scripts for input x={} using flow d={}. (Hash check was simplified)",
             input_value, flow_id
         )
     } else {
         format!(
-            "Execution failed for input x={} using flow d={}. F1 Script Success: {}, F2 Script Success: {}",
+            "Execution failed for input x={} using flow d={}. F1 Script Success: {}, F2 Script Success: {} (Hash check was simplified)",
             input_value, flow_id, script_f1_success, script_f2_success
         )
     };

@@ -229,7 +229,6 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
         }
     }
 }
-
 /// Builds the complete locking script for the F1 sub-function.
 ///
 /// This script enforces three conditions when being spent:
@@ -325,37 +324,287 @@ mod tests {
             blake3_verify_output_script,
         },
     };
+    use secp256k1::Secp256k1;
 
     use super::*;
 
     // Test Blake3 script generation
     #[test]
     fn test_blake3_script_generation() {
-        let message = [0x00; 32];
+        let message = [0u8; 32];
         let limb_len = 4;
         let expected_hash = *blake3::hash(message.as_ref()).as_bytes();
 
         println!("Expected hash: {}", hex::encode(expected_hash));
 
-        let mut bytes = blake3_push_message_script_with_limb(&message, limb_len)
+        // Test push message script generation (requires message argument)
+        let push_bytes = blake3_push_message_script_with_limb(&message, limb_len)
             .compile()
             .to_bytes();
-        let optimized =
-            optimizer::optimize(blake3_compute_script_with_limb(message.len(), limb_len).compile());
-        bytes.extend(optimized.to_bytes());
-        bytes.extend(
-            blake3_verify_output_script(expected_hash)
-                .compile()
-                .to_bytes(),
-        );
-        let script = ScriptBuf::from_bytes(bytes);
-        //let script_asm = script.to_asm_string();
 
-        // Print the script ASM for debugging
-        //println!("Blake3 script ASM: {}", script_asm);
+        // Test compute script generation
+        let optimized_compute =
+            optimizer::optimize(blake3_compute_script_with_limb(message.len(), limb_len).compile());
+
+        // Test verify output script generation
+        let verify_bytes = blake3_verify_output_script(expected_hash)
+            .compile()
+            .to_bytes();
+
+        // Combine scripts for execution (assuming message is pushed first)
+        let mut combined_script_bytes = push_bytes;
+        combined_script_bytes.extend(optimized_compute.to_bytes());
+        combined_script_bytes.extend(verify_bytes);
+
+        let script = ScriptBuf::from_bytes(combined_script_bytes);
+        // let script_asm = script.to_asm_string();
+        // println!("Blake3 script ASM: \n{}", script_asm);
 
         let result = execute_script_buf(script);
 
         println!("Result: {:?}", result);
+        assert!(result.success, "Blake3 script execution failed");
+    }
+
+    // --- New Tests ---
+
+    #[test]
+    fn test_calculate_flow_id_valid() {
+        // Example from manual calculation or previous run
+        // H(input=114, nonce=3) |_B=8 should give a specific flow_id if L allows
+        // Let's recalculate H(114 || 3) with Blake3
+        // input = 114 = 0x72000000 (u32 le)
+        // nonce = 3   = 0x0300000000000000 (u64 le)
+        // message = 72000000 0300000000000000
+        let mut hasher = Hasher::new();
+        hasher.update(&114u32.to_le_bytes());
+        hasher.update(&3u64.to_le_bytes());
+        let hash = hasher.finalize(); // Example hash: 3a910d... (depends on exact blake3 version)
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&hash.as_bytes()[0..4]);
+        let hash_u32_le = u32::from_le_bytes(bytes); // Example: 0x.......3a
+
+        // Case 1: B=8, L=4 (Max flow_id = 15)
+        // Mask = (1 << 8) - 1 = 0xFF
+        let expected_prefix_b8 = hash_u32_le & 0xFF;
+        if expected_prefix_b8 < 16 {
+            assert_eq!(
+                calculate_flow_id(114, 3, 8, 4),
+                Ok(expected_prefix_b8),
+                "Test Case 1 Failed: B=8, L=4"
+            );
+        } else {
+            // If the actual prefix is >= 16, the function should return Err
+            assert!(
+                calculate_flow_id(114, 3, 8, 4).is_err(),
+                "Test Case 1 Failed (Expected Err): B=8, L=4"
+            );
+        }
+
+        // Case 2: B=8, L=8 (Max flow_id = 255)
+        // The prefix should always be valid as prefix <= 0xFF
+        assert_eq!(
+            calculate_flow_id(114, 3, 8, 8),
+            Ok(expected_prefix_b8),
+            "Test Case 2 Failed: B=8, L=8"
+        );
+
+        // Case 3: B=4, L=4 (Max flow_id = 15)
+        // Mask = (1 << 4) - 1 = 0x0F
+        let expected_prefix_b4 = hash_u32_le & 0x0F;
+        assert_eq!(
+            calculate_flow_id(114, 3, 4, 4),
+            Ok(expected_prefix_b4),
+            "Test Case 3 Failed: B=4, L=4"
+        );
+    }
+
+    #[test]
+    fn test_calculate_flow_id_invalid_range() {
+        // Find input/nonce that hashes to a prefix outside the L range
+        // Let B=8, L=4. We need H(x,r)|_8 >= 16
+        let mut input = 1u32;
+        let mut nonce = 0u64;
+        loop {
+            let mut hasher = Hasher::new();
+            hasher.update(&input.to_le_bytes());
+            hasher.update(&nonce.to_le_bytes());
+            let hash = hasher.finalize();
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&hash.as_bytes()[0..4]);
+            let hash_u32_le = u32::from_le_bytes(bytes);
+            let prefix_b8 = hash_u32_le & 0xFF;
+
+            if prefix_b8 >= 16 {
+                // Found a hash prefix outside [0, 15]
+                assert!(calculate_flow_id(input, nonce, 8, 4).is_err());
+                break;
+            }
+            nonce = nonce.checked_add(1).unwrap();
+            if nonce > 1_000_000 {
+                // Safety break
+                input = input.checked_add(1).unwrap();
+                nonce = 0;
+                if input > 100 {
+                    panic!("Could not find invalid hash prefix easily");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_find_valid_nonce_finds_correct_flow() {
+        let input = 114u32;
+        let b_bits = 8;
+        let l_bits = 4;
+        let max_flow_id = 1u32 << l_bits; // 16
+
+        match find_valid_nonce(input, b_bits, l_bits) {
+            Ok((found_nonce, found_flow_id)) => {
+                println!(
+                    "Found nonce={}, flow_id={} for input={}",
+                    found_nonce, found_flow_id, input
+                );
+                // Verify that the found flow_id is indeed valid for the nonce
+                assert_eq!(
+                    calculate_flow_id(input, found_nonce, b_bits, l_bits),
+                    Ok(found_flow_id),
+                    "Nonce verification failed: calculate_flow_id mismatch"
+                );
+                // Verify that the found flow_id is within the allowed range
+                assert!(
+                    found_flow_id < max_flow_id,
+                    "Found flow_id {} is not less than max_flow_id {}",
+                    found_flow_id,
+                    max_flow_id
+                );
+            }
+            Err(e) => {
+                panic!("find_valid_nonce failed to find a nonce: {}", e);
+            }
+        }
+    }
+
+    // Potential future test: test find_valid_nonce ...
+
+    #[test]
+    fn test_locking_script_f1_valid() {
+        let config = ColliderVmConfig {
+            n: 1,
+            m: 1,
+            l: 4,
+            b: 8,
+            k: 2,
+        };
+        let secp = Secp256k1::new();
+        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
+        let _keypair = Keypair::from_secret_key(&secp, &privkey);
+        let signer_pubkey = PublicKey::new(pubkey);
+
+        let flow_id = 5u32;
+        let input_value = 150u32; // Should pass F1 (> 100)
+
+        // Build the locking script
+        let script = build_script_f1_locked(&signer_pubkey, flow_id, config.b);
+
+        // Construct a valid witness: <sig> <flow_id> <input_x>
+        // We use a dummy signature here, as execute_script_buf doesn't verify it.
+        let dummy_sig_bytes = [0u8; 64];
+
+        let witness_script = Builder::new()
+            .push_slice(dummy_sig_bytes)
+            .push_int(flow_id as i64)
+            .push_int(input_value as i64)
+            .into_script();
+
+        // Combine witness and locking script
+        let mut full_script_bytes = witness_script.to_bytes();
+        full_script_bytes.extend(script.to_bytes());
+        let full_script = ScriptBuf::from_bytes(full_script_bytes);
+
+        let result = execute_script_buf(full_script);
+        println!("F1 Valid Test Result: {:?}", result);
+        assert!(
+            result.success,
+            "F1 script should succeed with valid witness"
+        );
+    }
+
+    #[test]
+    fn test_locking_script_f1_invalid_logic() {
+        let config = ColliderVmConfig {
+            n: 1,
+            m: 1,
+            l: 4,
+            b: 8,
+            k: 2,
+        };
+        let secp = Secp256k1::new();
+        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
+        let _keypair = Keypair::from_secret_key(&secp, &privkey);
+        let signer_pubkey = PublicKey::new(pubkey);
+
+        let flow_id = 5u32;
+        let input_value = 50u32; // Should fail F1 (<= 100)
+
+        let script = build_script_f1_locked(&signer_pubkey, flow_id, config.b);
+        let dummy_sig_bytes = [0u8; 64];
+        let witness_script = Builder::new()
+            .push_slice(dummy_sig_bytes)
+            .push_int(flow_id as i64)
+            .push_int(input_value as i64)
+            .into_script();
+
+        let mut full_script_bytes = witness_script.to_bytes();
+        full_script_bytes.extend(script.to_bytes());
+        let full_script = ScriptBuf::from_bytes(full_script_bytes);
+
+        let result = execute_script_buf(full_script);
+        println!("F1 Invalid Logic Test Result: {:?}", result);
+        assert!(
+            !result.success,
+            "F1 script should fail with invalid input logic"
+        );
+    }
+
+    #[test]
+    fn test_locking_script_f1_invalid_flow_id() {
+        let config = ColliderVmConfig {
+            n: 1,
+            m: 1,
+            l: 4,
+            b: 8,
+            k: 2,
+        };
+        let secp = Secp256k1::new();
+        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
+        let _keypair = Keypair::from_secret_key(&secp, &privkey);
+        let signer_pubkey = PublicKey::new(pubkey);
+
+        let correct_flow_id = 5u32;
+        let incorrect_flow_id = 6u32;
+        let input_value = 150u32; // Passes F1 logic
+
+        // Script expects correct_flow_id
+        let script = build_script_f1_locked(&signer_pubkey, correct_flow_id, config.b);
+
+        // Witness provides incorrect_flow_id
+        let dummy_sig_bytes = [0u8; 64];
+        let witness_script = Builder::new()
+            .push_slice(dummy_sig_bytes)
+            .push_int(incorrect_flow_id as i64) // Use incorrect flow ID here
+            .push_int(input_value as i64)
+            .into_script();
+
+        let mut full_script_bytes = witness_script.to_bytes();
+        full_script_bytes.extend(script.to_bytes());
+        let full_script = ScriptBuf::from_bytes(full_script_bytes);
+
+        let result = execute_script_buf(full_script);
+        println!("F1 Invalid Flow ID Test Result: {:?}", result);
+        assert!(
+            !result.success,
+            "F1 script should fail with incorrect flow ID in witness"
+        );
     }
 }
