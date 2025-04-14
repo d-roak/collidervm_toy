@@ -5,7 +5,7 @@ use bitcoin::{
     blockdata::script::{Builder, ScriptBuf},
     script::PushBytesBuf,
 };
-use bitvm::{self, execute_script_buf};
+use bitvm::execute_script_buf;
 use secp256k1::{self, Keypair, Secp256k1};
 
 use crate::collidervm_toy::{
@@ -17,8 +17,8 @@ use crate::collidervm_toy::{
 // --- Simulation Structures ---
 pub struct SimulationResult {
     pub success: bool,
-    pub f1_result: bool,
-    pub f2_result: bool,
+    pub _f1_result: bool,
+    pub _f2_result: bool,
     pub message: String,
 }
 
@@ -77,9 +77,9 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
         let keypair = Keypair::from_secret_key(&secp, &privkey);
         let (xonly, _parity) = keypair.x_only_public_key();
         let signer = SignerInfo {
-            id: i,
+            _id: i,
             pubkey: PublicKey::new(secp_pubkey),
-            privkey: privkey,
+            _privkey: privkey,
             keypair,
             xonly,
         };
@@ -91,9 +91,9 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
     for i in 0..config.m {
         let (privkey, secp_pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let operator = OperatorInfo {
-            id: i,
+            _id: i,
             pubkey: PublicKey::new(secp_pubkey),
-            privkey: privkey,
+            _privkey: privkey,
         };
         println!("  Generated Operator {}: {}", i, operator.pubkey);
         operators.push(operator);
@@ -118,45 +118,33 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
         let mut steps = Vec::with_capacity(config.k);
 
         // --- Presign Step 1 (F1) ---
-        // 1a. Create Locking Script for F1
-        //    Use the public key of the *first* signer for the script construction (simplification)
         let script_f1 = build_script_f1_locked(&signers[0].pubkey, flow_id, config.b);
-
-        // 1b. Create Placeholder Transaction Template for F1
         let tx_f1_template = create_placeholder_tx(
             script_f1.clone(),
-            funding_amount, // Output value matches funding for simplicity
+            funding_amount,
             funding_txid,
             funding_vout,
         );
-
-        // 1c. Create Simplified Sighash Message for F1
-        //     (Using toy function - real sighash depends on more tx details)
         let sighash_msg_f1 = create_toy_sighash_message(&script_f1, tx_f1_template.output[0].value);
-
-        // 1d. Collect Signatures for F1 from ALL signers
         let mut signatures_f1 = HashMap::new();
         for signer in &signers {
             let signature = secp.sign_schnorr(&sighash_msg_f1, &signer.keypair);
             signatures_f1.insert(signer.pubkey.to_bytes(), signature);
         }
-
-        // 1e. Create Presigned Step for F1
         steps.push(PresignedStep {
-            tx_template: tx_f1_template.clone(),
+            _tx_template: tx_f1_template.clone(),
             sighash_message: sighash_msg_f1,
             signatures: signatures_f1,
             locking_script: script_f1,
         });
 
         // --- Presign Step 2 (F2) ---
-        // (Similar process, but tx_f2 spends tx_f1)
         let script_f2 = build_script_f2_locked(&signers[0].pubkey, flow_id, config.b);
         let tx_f2_template = create_placeholder_tx(
             script_f2.clone(),
-            funding_amount,                // Assuming value is conserved
-            tx_f1_template.compute_txid(), // Input is output of F1 tx
-            0,                             // Assuming F1 tx had one output at vout 0
+            funding_amount,
+            tx_f1_template.compute_txid(),
+            0,
         );
         let sighash_msg_f2 = create_toy_sighash_message(&script_f2, tx_f2_template.output[0].value);
         let mut signatures_f2 = HashMap::new();
@@ -165,14 +153,20 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
             signatures_f2.insert(signer.pubkey.to_bytes(), signature);
         }
         steps.push(PresignedStep {
-            tx_template: tx_f2_template,
+            _tx_template: tx_f2_template,
             sighash_message: sighash_msg_f2,
             signatures: signatures_f2,
             locking_script: script_f2,
         });
 
         // Add the fully signed flow to the map
-        presigned_flows_map.insert(flow_id, PresignedFlow { flow_id, steps });
+        presigned_flows_map.insert(
+            flow_id,
+            PresignedFlow {
+                _flow_id: flow_id,
+                steps,
+            },
+        );
 
         if flow_id % 4 == 3 || flow_id == num_flows as u32 - 1 {
             println!("  Created and presigned flow {}...", flow_id);
@@ -362,8 +356,8 @@ pub fn online_execution(
 
     Ok(SimulationResult {
         success: overall_success,
-        f1_result: script_f1_success, // Store full script execution results
-        f2_result: script_f2_success,
+        _f1_result: script_f1_success, // Store full script execution results
+        _f2_result: script_f2_success,
         message: result_message,
     })
 }
