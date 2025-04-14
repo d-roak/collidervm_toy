@@ -5,8 +5,12 @@ use bitcoin::{
 };
 use bitcoin_hashes::{HashEngine, sha256};
 use blake3::Hasher;
+use indicatif::{ProgressBar, ProgressStyle};
 use secp256k1::{Keypair, Message, SecretKey, schnorr::Signature};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 /// Threshold value for the F1 subfunction logic check.
 /// In this toy simulation, F1 succeeds if the input `x` is greater than this value.
@@ -183,7 +187,6 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
     let expected_attempts: u64 = 1u64
         .checked_shl((b_bits.saturating_sub(l_bits)) as u32) // Calculate 2^(B-L)
         .unwrap_or(u64::MAX);
-    let report_interval = (expected_attempts / 10).max(100_000); // Report progress periodically or every 100k hashes
 
     println!(
         "Finding valid nonce (L={}, B={})... (Expected work: ~2^{} = {} hashes)",
@@ -193,23 +196,132 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
         expected_attempts
     );
 
+    // Create a progress bar with expected attempts
+    let progress_bar = if expected_attempts > 100 {
+        let pb = ProgressBar::new(expected_attempts);
+
+        // More attractive and informative template
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] {pos}/{len} ({percent}%) [{per_sec}] {msg}")
+                .unwrap()
+                .progress_chars("■□·")
+        );
+
+        pb.set_message("Finding nonce for valid flow...");
+        pb.enable_steady_tick(Duration::from_millis(100)); // Update the spinner every 100ms to show activity
+        Some(pb)
+    } else {
+        None
+    };
+
+    // Variables for hash rate calculation
+    let start_time = Instant::now();
+    let report_interval = 50_000; // Update progress every 50K hashes
+    let mut last_update = 0;
+    let mut hash_rates = Vec::with_capacity(10); // Store last 10 hash rates for averaging
+
     loop {
         // Check if the current nonce yields a valid flow ID
         match calculate_flow_id(input, nonce, b_bits, l_bits) {
             Ok(flow_id) => {
                 // Found a nonce `r` such that H(x, r)|_B = d ∈ D
-                println!(
-                    "  Found valid nonce {} -> flow_id {} after {} hashes.",
-                    nonce,
-                    flow_id,
-                    nonce.saturating_add(1) // nonce starts at 0
-                );
+                if let Some(pb) = &progress_bar {
+                    pb.finish_with_message(format!(
+                        "Found flow_id {} after {} hashes!",
+                        flow_id,
+                        nonce + 1
+                    ));
+                } else {
+                    println!(
+                        "  Found valid nonce {} -> flow_id {} after {} hashes.",
+                        nonce,
+                        flow_id,
+                        nonce + 1 // nonce starts at 0
+                    );
+                }
+
+                // Calculate and display the final hash rate
+                let elapsed = start_time.elapsed();
+                let hash_rate = if elapsed.as_secs() > 0 {
+                    nonce as f64 / elapsed.as_secs_f64()
+                } else {
+                    nonce as f64 // avoid division by zero
+                };
+
+                println!("  Average hash rate: {:.2} hashes/sec", hash_rate);
+
                 return Ok((nonce, flow_id));
             }
             Err(_) => {
                 // Hash prefix was outside the valid range [0, 2^L - 1], try next nonce
-                if nonce > 0 && nonce % report_interval == 0 {
-                    println!("  Tried {} hashes...", nonce);
+                if nonce > last_update + report_interval {
+                    // Calculate current hash rate
+                    let elapsed = start_time.elapsed();
+                    let hash_rate = if elapsed.as_secs() > 0 {
+                        nonce as f64 / elapsed.as_secs_f64()
+                    } else {
+                        nonce as f64 // avoid division by zero
+                    };
+
+                    // Keep track of hash rates for averaging
+                    hash_rates.push(hash_rate);
+                    if hash_rates.len() > 10 {
+                        hash_rates.remove(0);
+                    }
+                    let avg_hash_rate: f64 =
+                        hash_rates.iter().sum::<f64>() / hash_rates.len() as f64;
+
+                    // Update progress bar with current rate and ETA
+                    if let Some(pb) = &progress_bar {
+                        pb.set_position(nonce);
+
+                        // More detailed progress message
+                        let eta_secs = if nonce >= expected_attempts {
+                            0.0
+                        } else {
+                            (expected_attempts - nonce) as f64 / avg_hash_rate
+                        };
+
+                        let eta_str = if eta_secs < 60.0 {
+                            format!("{:.1}s", eta_secs)
+                        } else if eta_secs < 3600.0 {
+                            format!("{:.1}m {:.0}s", eta_secs / 60.0, eta_secs % 60.0)
+                        } else {
+                            format!(
+                                "{:.1}h {:.0}m",
+                                eta_secs / 3600.0,
+                                (eta_secs % 3600.0) / 60.0
+                            )
+                        };
+
+                        pb.set_message(format!(
+                            "ETA: {} @ {:.2} KH/s, {:.1}% done",
+                            eta_str,
+                            avg_hash_rate / 1000.0,
+                            (nonce as f64 / expected_attempts as f64) * 100.0
+                        ));
+                    } else {
+                        println!("  Tried {} hashes... ({:.2} hash/s)", nonce, avg_hash_rate);
+                    }
+
+                    last_update = nonce;
+                }
+
+                // Update progress bar more frequently (without recalculating hash rate)
+                if let Some(pb) = &progress_bar {
+                    // Update the progress bar more frequently for high workloads
+                    let update_frequency = if expected_attempts > 1_000_000 {
+                        5_000 // Every 5K hashes for large workloads
+                    } else if expected_attempts > 100_000 {
+                        1_000 // Every 1K hashes for medium workloads
+                    } else {
+                        100 // Every 100 hashes for small workloads
+                    };
+
+                    if nonce % update_frequency == 0 {
+                        pb.set_position(nonce);
+                    }
                 }
 
                 // Increment nonce, checking for overflow
@@ -220,6 +332,9 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
                 // Safety break after excessive attempts (e.g., 100x expected work)
                 // This prevents infinite loops in case of configuration errors.
                 if nonce > expected_attempts.saturating_mul(100) {
+                    if let Some(pb) = &progress_bar {
+                        pb.finish_with_message("Exceeded maximum attempts");
+                    }
                     return Err(format!(
                         "Could not find a valid nonce after {} attempts (expected ~{})",
                         nonce, expected_attempts
@@ -229,6 +344,7 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
         }
     }
 }
+
 /// Builds the complete locking script for the F1 sub-function.
 ///
 /// This script enforces three conditions when being spent:
@@ -311,6 +427,82 @@ pub fn build_script_f2_locked(
         // 4. Success: If all VERIFY ops passed, the script is valid.
         .push_opcode(opcodes::OP_TRUE)
         .into_script()
+}
+
+/// Benchmarks the hash rate of the current machine.
+///
+/// This function performs Blake3 hashing operations for a short period to measure
+/// the machine's hash performance. This helps calibrate the difficulty parameters
+/// for the ColliderVM simulation.
+///
+/// # Arguments
+/// * `duration_secs` - How long to run the benchmark in seconds
+///
+/// # Returns
+/// The average number of hashes per second achievable on this machine
+pub fn benchmark_hash_rate(duration_secs: u64) -> u64 {
+    println!(
+        "Calibrating hash rate... (running for {} seconds)",
+        duration_secs
+    );
+
+    // Create a progress bar
+    let pb = ProgressBar::new(100);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] {percent}% {msg}")
+            .unwrap()
+            .progress_chars("■□·"),
+    );
+    pb.set_message("Measuring hash performance...");
+    pb.enable_steady_tick(Duration::from_millis(100));
+
+    let start_time = Instant::now();
+    let end_time = start_time + Duration::from_secs(duration_secs);
+
+    // Use 42 as a sample input value
+    let input = 42u32;
+    let mut nonce: u64 = 0;
+    let mut hash_count: u64 = 0;
+
+    while Instant::now() < end_time {
+        // Compute H(input || nonce) using Blake3 - the core operation in find_valid_nonce
+        let mut hasher = Hasher::new();
+        hasher.update(&input.to_le_bytes());
+        hasher.update(&nonce.to_le_bytes());
+        let _hash = hasher.finalize();
+
+        hash_count += 1;
+        nonce += 1;
+
+        // Update progress bar periodically
+        if hash_count % 100_000 == 0 {
+            let elapsed = Instant::now().duration_since(start_time);
+            let progress = elapsed.as_secs_f64() / duration_secs as f64;
+            pb.set_position((progress * 100.0) as u64);
+
+            let current_rate = hash_count as f64 / elapsed.as_secs_f64();
+            pb.set_message(format!(
+                "{:.2} million hashes/sec",
+                current_rate / 1_000_000.0
+            ));
+        }
+    }
+
+    let elapsed = Instant::now().duration_since(start_time);
+    let hash_rate = hash_count as f64 / elapsed.as_secs_f64();
+    let hash_rate_u64 = hash_rate as u64;
+
+    pb.finish_with_message(format!(
+        "Measured: {:.2} million hashes/sec",
+        hash_rate / 1_000_000.0
+    ));
+    println!(
+        "Hash rate calibration complete: {} hashes/sec",
+        hash_rate_u64
+    );
+
+    hash_rate_u64
 }
 
 #[cfg(test)]
