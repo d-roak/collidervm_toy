@@ -145,26 +145,53 @@ The `cargo run [input_value]` command triggers the following sequence:
 - **Prerequisites:** Ensure you have Rust and Cargo installed ([https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)).
 - **Build:** Navigate to the project directory and build the project:
 
-  ```bash
-  cargo build
-  ```
+```bash
+Usage: collidervm_toy [OPTIONS]
 
-- **Run with Default Input (114):**
+Options:
+  -i, --input <INPUT>
+          Input value to test (default: 114)
+          
+          [default: 114]
 
-  ```bash
-  cargo run
-  ```
+  -p, --preset <PRESET>
+          Preset configuration to use
+          
+          [default: default]
 
-  This input (114) satisfies both `F1 (114 > 100)` and `F2 (114 < 200)`, so the simulation should succeed (assuming a valid nonce is found).
+          Possible values:
+          - default: Default configuration (quick to run for demos)
+          - medium:  Medium difficulty (10-15 seconds)
+          - hard:    Higher difficulty (~1 minute)
+          - custom:  Custom configuration (use with -n, -m, -l, -b, -k options)
 
-- **Run with Custom Input:** Provide an integer as a command-line argument:
+  -s, --signers <SIGNERS>
+          Number of signers (1-of-n honest for safety)
 
-  ```bash
-  cargo run <input_value>
-  ```
+  -o, --operators <OPERATORS>
+          Number of operators (1-of-m honest for liveness)
 
-  - Example (Fails F1 logic check): `cargo run 90`
-  - Example (Fails F2 logic check): `cargo run 250`
+  -l, --l-param <L_PARAM>
+          Flow set size parameter L (set D size = 2^L)
+
+  -b, --b-param <B_PARAM>
+          Hash prefix bits parameter B
+
+  -k, --k-param <K_PARAM>
+          Number of subfunctions (fixed at 2 for the toy model)
+
+      --hash-rate <HASH_RATE>
+          Skip hash rate calibration and use the provided value
+
+      --no-calibration
+          Disable hash rate calibration
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+```
 
 ## Future Enhancements
 
