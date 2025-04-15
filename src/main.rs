@@ -50,6 +50,10 @@ struct Cli {
     /// Disable hash rate calibration
     #[arg(long)]
     no_calibration: bool,
+
+    /// Auto mode: disable artificial sleeps and user prompts
+    #[arg(long)]
+    auto: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum, Debug)]
@@ -293,10 +297,14 @@ fn main() {
     );
 
     println!("\n{}. Press Enter to start...", "Setup".bold());
-    let _ = std::io::stdin().read_line(&mut String::new()); // Wait for user input
+
+    // Skip waiting for user input if auto mode is enabled
+    if !cli.auto {
+        let _ = std::io::stdin().read_line(&mut String::new()); // Wait for user input
+    }
 
     // 3. Run the full simulation (Offline Setup + Online Execution)
-    match simulation::run_simulation(config, input_value) {
+    match simulation::run_simulation(config, input_value, cli.auto) {
         Ok(result) => {
             // 4. Print the final outcome
             println!("\n{}", "--- Final Simulation Result ---".bold().blue());

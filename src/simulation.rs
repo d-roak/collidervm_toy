@@ -89,24 +89,29 @@ fn create_placeholder_tx(
 ///
 /// # Arguments
 /// * `config` - The `ColliderVmConfig` specifying parameters like n, m, L, B, k.
+/// * `auto` - Whether to run in auto mode (skipping sleeps and prompts).
 ///
 /// # Returns
 /// * `Ok(SetupResult)` - A tuple containing the generated signers, operators, and the map of presigned flows.
 /// * `Err(Box<dyn Error>)` - An error if setup fails (e.g., key generation).
-pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn Error>> {
-    println!("\n{}", "---  PHASE 1: Offline Setup --- ".bold().yellow());
-    println!(
-        "{}",
-        "(Signers generate keys and presign all transaction flows)".dimmed()
-    );
-    thread::sleep(Duration::from_millis(500)); // Small pause
+pub fn offline_setup(config: &ColliderVmConfig, auto: bool) -> Result<SetupResult, Box<dyn Error>> {
+    if !auto {
+        println!("\n{}", "---  PHASE 1: Offline Setup --- ".bold().yellow());
+        println!(
+            "{}",
+            "(Signers generate keys and presign all transaction flows)".dimmed()
+        );
+        thread::sleep(Duration::from_millis(500)); // Small pause
+    }
 
-    println!(
-        "\nGenerating {} signers and {} operators...",
-        config.n.to_string().cyan(),
-        config.m.to_string().cyan()
-    );
-    thread::sleep(Duration::from_millis(200));
+    if !auto {
+        println!(
+            "\nGenerating {} signers and {} operators...",
+            config.n.to_string().cyan(),
+            config.m.to_string().cyan()
+        );
+        thread::sleep(Duration::from_millis(200));
+    }
 
     // Initialize Secp256k1 context for key operations
     let secp = Secp256k1::new();
@@ -114,7 +119,9 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
     let mut operators = Vec::with_capacity(config.m);
 
     // 1. Generate Signer Info
-    println!("Generating Signer keys...");
+    if !auto {
+        println!("Generating Signer keys...");
+    }
     for i in 0..config.n {
         let (privkey, secp_pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let keypair = Keypair::from_secret_key(&secp, &privkey);
@@ -126,18 +133,24 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
             keypair,
             xonly,
         };
-        println!(
-            "  {} {}: {}",
-            "Generated Signer".dimmed(),
-            i,
-            signer.pubkey.to_string().green()
-        );
+        if !auto {
+            println!(
+                "  {} {}: {}",
+                "Generated Signer".dimmed(),
+                i,
+                signer.pubkey.to_string().green()
+            );
+        }
         signers.push(signer);
-        thread::sleep(Duration::from_millis(50)); // Tiny pause per key
+        if !auto {
+            thread::sleep(Duration::from_millis(50)); // Tiny pause per key
+        }
     }
 
     // 1. Generate Operator Info
-    println!("\nGenerating Operator keys...");
+    if !auto {
+        println!("\nGenerating Operator keys...");
+    }
     for i in 0..config.m {
         let (privkey, secp_pubkey) = secp.generate_keypair(&mut rand::thread_rng());
         let operator = OperatorInfo {
@@ -145,32 +158,40 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
             pubkey: PublicKey::new(secp_pubkey),
             privkey, // Store private key for simulation
         };
-        println!(
-            "  {} {}: {}",
-            "Generated Operator".dimmed(),
-            i,
-            operator.pubkey.to_string().blue()
-        );
+        if !auto {
+            println!(
+                "  {} {}: {}",
+                "Generated Operator".dimmed(),
+                i,
+                operator.pubkey.to_string().blue()
+            );
+        }
         operators.push(operator);
-        thread::sleep(Duration::from_millis(50)); // Tiny pause per key
+        if !auto {
+            thread::sleep(Duration::from_millis(50)); // Tiny pause per key
+        }
     }
 
-    println!(
-        "\n{} {} flows (Transaction Templates + Signatures)...",
-        "Generating".yellow(),
-        (1u64 << config.l).to_string().cyan()
-    );
-    thread::sleep(Duration::from_millis(300));
+    if !auto {
+        println!(
+            "\n{} {} flows (Transaction Templates + Signatures)...",
+            "Generating".yellow(),
+            (1u64 << config.l).to_string().cyan()
+        );
+        thread::sleep(Duration::from_millis(300));
+    }
     // Calculate the number of flows (|D| = 2^L), limited for the toy example.
     let num_flows = std::cmp::min(1u64 << config.l, 16u64) as u32;
-    println!(
-        "  {}",
-        format!(
-            "(Targeting {} flows for this demo, L={}, max 16)",
-            num_flows, config.l
-        )
-        .dimmed()
-    );
+    if !auto {
+        println!(
+            "  {}",
+            format!(
+                "(Targeting {} flows for this demo, L={}, max 16)",
+                num_flows, config.l
+            )
+            .dimmed()
+        );
+    }
     let mut presigned_flows_map: HashMap<u32, PresignedFlow> = HashMap::new();
 
     // Define a dummy funding transaction output (needed for F1's input)
@@ -233,25 +254,31 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
         if flow_id % (num_flows / 4).max(1) == (num_flows / 4).max(1) - 1
             || flow_id == num_flows - 1
         {
-            println!(
-                "  {} flow d={}...",
-                "Created and presigned".dimmed(),
-                flow_id
-            );
-            thread::sleep(Duration::from_millis(100));
+            if !auto {
+                println!(
+                    "  {} flow d={}...",
+                    "Created and presigned".dimmed(),
+                    flow_id
+                );
+            }
+            if !auto {
+                thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 
-    println!(
-        "\n{} {} flows presigned by {} signers.",
-        "Offline setup complete.".bold().green(),
-        presigned_flows_map.len().to_string().cyan(),
-        config.n.to_string().cyan()
-    );
-    println!(
-        "{}",
-        "-----------------------------------------------------".yellow()
-    );
+    if !auto {
+        println!(
+            "\n{} {} flows presigned by {} signers.",
+            "Offline setup complete.".bold().green(),
+            presigned_flows_map.len().to_string().cyan(),
+            config.n.to_string().cyan()
+        );
+        println!(
+            "{}",
+            "-----------------------------------------------------".yellow()
+        );
+    }
     Ok((signers, operators, presigned_flows_map))
 }
 
@@ -274,6 +301,7 @@ pub fn offline_setup(config: &ColliderVmConfig) -> Result<SetupResult, Box<dyn E
 /// * `presigned_flows_map` - The map of `PresignedFlow`s generated during setup.
 /// * `config` - The `ColliderVmConfig`.
 /// * `input_value` - The input `x` for the computation.
+/// * `auto` - Whether to run in auto mode (skipping sleeps and prompts).
 ///
 /// # Returns
 /// * `Ok(SimulationResult)` - The result of the online execution simulation.
@@ -284,70 +312,89 @@ pub fn online_execution(
     presigned_flows_map: &HashMap<u32, PresignedFlow>,
     config: &ColliderVmConfig,
     input_value: u32,
+    auto: bool,
 ) -> Result<SimulationResult, Box<dyn Error>> {
-    println!("\n{}", "--- PHASE 2: Online Execution --- ".bold().yellow());
-    println!(
-        "{}",
-        "(Operator finds nonce, selects flow, executes scripts)".dimmed()
-    );
-    thread::sleep(Duration::from_millis(500));
+    if !auto {
+        println!("\n{}", "--- PHASE 2: Online Execution --- ".bold().yellow());
+        println!(
+            "{}",
+            "(Operator finds nonce, selects flow, executes scripts)".dimmed()
+        );
+        thread::sleep(Duration::from_millis(500));
+    }
 
-    println!("\nConfiguration:");
-    println!(
-        "  L={}, B={}, k={}, n={}, m={}",
-        config.l.to_string().cyan(),
-        config.b.to_string().cyan(),
-        config.k.to_string().cyan(),
-        config.n.to_string().cyan(),
-        config.m.to_string().cyan()
-    );
-    println!("Input value (x): {}", input_value.to_string().cyan());
-    thread::sleep(Duration::from_millis(300));
+    if !auto {
+        println!("\nConfiguration:");
+        println!(
+            "  L={}, B={}, k={}, n={}, m={}",
+            config.l.to_string().cyan(),
+            config.b.to_string().cyan(),
+            config.k.to_string().cyan(),
+            config.n.to_string().cyan(),
+            config.m.to_string().cyan()
+        );
+        println!("Input value (x): {}", input_value.to_string().cyan());
+        thread::sleep(Duration::from_millis(300));
+    }
 
     // 1. Operator finds a valid nonce `r` and corresponding flow ID `d`
-    println!(
-        "\n{}: Finding Nonce (r) and Flow ID (d) for input x={}...",
-        "Operator Action".bold().blue(),
-        input_value
-    );
+    if !auto {
+        println!(
+            "\n{}: Finding Nonce (r) and Flow ID (d) for input x={}...",
+            "Operator Action".bold().blue(),
+            input_value
+        );
+    }
     let (nonce, flow_id) = match find_valid_nonce(input_value, config.b, config.l) {
         Ok(result) => result,
         Err(e) => {
             return Err(format!("Failed to find a valid nonce: {}", e).into());
         }
     };
-    println!(
-        "  {} Nonce (r): {}, Required Flow ID (d): {}",
-        "Found!".bold().green(),
-        nonce.to_string().cyan(),
-        flow_id.to_string().cyan()
-    );
-    thread::sleep(Duration::from_millis(300));
+    if !auto {
+        println!(
+            "  {} Nonce (r): {}, Required Flow ID (d): {}",
+            "Found!".bold().green(),
+            nonce.to_string().cyan(),
+            flow_id.to_string().cyan()
+        );
+        if !auto {
+            thread::sleep(Duration::from_millis(300));
+        }
+    }
 
     // 2. Retrieve the PresignedFlow for the calculated flow ID `d`
-    println!(
-        "\n{}: Retrieving presigned flow d={}...",
-        "Operator Action".bold().blue(),
-        flow_id
-    );
+    if !auto {
+        println!(
+            "\n{}: Retrieving presigned flow d={}...",
+            "Operator Action".bold().blue(),
+            flow_id
+        );
+    }
     let presigned_flow = presigned_flows_map.get(&flow_id).ok_or_else(|| {
         format!(
             "Critical Error: Presigned flow d={} not found after nonce search!",
             flow_id
         )
     })?;
-    println!(
-        "  {} Retrieved presigned flow d={}",
-        "Success:".green(),
-        flow_id
-    );
-    thread::sleep(Duration::from_millis(300));
+    if !auto {
+        println!(
+            "  {} Retrieved presigned flow d={}",
+            "Success:".green(),
+            flow_id
+        );
+        if !auto {
+            thread::sleep(Duration::from_millis(300));
+        }
+    }
 
     // --- Perform Off-Chain Checks (Informational Only) ---
-    println!(
-        "\n{}",
-        "--- Off-Chain Check Results (Informational) ---".dimmed()
-    );
+    if !auto {
+        println!(
+            "\n{}",
+            "--- Off-Chain Check Results (Informational) ---".dimmed()
+        );
+    }
     let secp = Secp256k1::verification_only();
     let signer0_pubkey = &signers[0].pubkey;
     let signer0_xonly = &signers[0].xonly;
@@ -363,52 +410,58 @@ pub fn online_execution(
         .is_ok();
     let offchain_hash_prefix_valid =
         calculate_flow_id(input_value, nonce, config.b, config.l) == Ok(flow_id);
-    println!(
-        "  {} F1 Signature Valid (Signer 0): {}",
-        "Check:".dimmed(),
-        offchain_sig_f1_valid
-            .to_string()
-            .color(if offchain_sig_f1_valid {
-                Color::Green
-            } else {
-                Color::Red
-            })
-    );
-    println!(
-        "  {} F2 Signature Valid (Signer 0): {}",
-        "Check:".dimmed(),
-        offchain_sig_f2_valid
-            .to_string()
-            .color(if offchain_sig_f2_valid {
-                Color::Green
-            } else {
-                Color::Red
-            })
-    );
-    println!(
-        "  {} Hash Prefix Valid (H(x,r)|_B == d): {}",
-        "Check:".dimmed(),
-        offchain_hash_prefix_valid
-            .to_string()
-            .color(if offchain_hash_prefix_valid {
-                Color::Green
-            } else {
-                Color::Red
-            })
-    );
-    println!(
-        "{}",
-        "---------------------------------------------".dimmed()
-    );
-    thread::sleep(Duration::from_millis(500));
+    if !auto {
+        println!(
+            "  {} F1 Signature Valid (Signer 0): {}",
+            "Check:".dimmed(),
+            offchain_sig_f1_valid
+                .to_string()
+                .color(if offchain_sig_f1_valid {
+                    Color::Green
+                } else {
+                    Color::Red
+                })
+        );
+        println!(
+            "  {} F2 Signature Valid (Signer 0): {}",
+            "Check:".dimmed(),
+            offchain_sig_f2_valid
+                .to_string()
+                .color(if offchain_sig_f2_valid {
+                    Color::Green
+                } else {
+                    Color::Red
+                })
+        );
+        println!(
+            "  {} Hash Prefix Valid (H(x,r)|_B == d): {}",
+            "Check:".dimmed(),
+            offchain_hash_prefix_valid
+                .to_string()
+                .color(if offchain_hash_prefix_valid {
+                    Color::Green
+                } else {
+                    Color::Red
+                })
+        );
+        println!(
+            "{}",
+            "---------------------------------------------".dimmed()
+        );
+    }
+    if !auto {
+        thread::sleep(Duration::from_millis(500));
+    }
 
     // --- Construct and Execute Full Script for Step F1 ---
-    println!(
-        "\n{}: Executing Full Script Step F1 (Flow d={})...",
-        "Operator Action".bold().blue(),
-        flow_id
-    );
-    thread::sleep(Duration::from_millis(300));
+    if !auto {
+        println!(
+            "\n{}: Executing Full Script Step F1 (Flow d={})...",
+            "Operator Action".bold().blue(),
+            flow_id
+        );
+        thread::sleep(Duration::from_millis(300));
+    }
 
     let witness_script_f1 = {
         let mut builder = Builder::new();
@@ -422,39 +475,47 @@ pub fn online_execution(
     let mut full_script_bytes_f1 = witness_script_f1.to_bytes();
     full_script_bytes_f1.extend(step_f1.locking_script.to_bytes());
     let full_script_f1 = ScriptBuf::from_bytes(full_script_bytes_f1);
-    println!(
-        "  {} Full Script F1: {}",
-        "Info:".dimmed(),
-        full_script_f1.to_asm_string().italic()
-    );
+    if !auto {
+        println!(
+            "  {} Full Script F1: {}",
+            "Info:".dimmed(),
+            full_script_f1.to_asm_string().italic()
+        );
+    }
 
     let exec_result_f1 = execute_script_buf(full_script_f1.clone());
     let script_f1_success = exec_result_f1.success;
-    println!(
-        "    => {}: {} (Log: {:?})",
-        "Execution Result".bold(),
-        if script_f1_success {
-            "PASSED ✅".bold().green()
-        } else {
-            "FAILED ❌".bold().red()
-        },
-        exec_result_f1
-    );
-    if !script_f1_success {
+    if !auto {
         println!(
-            "       {}",
-            "(Toy Note: Failure might be due to OP_CHECKSIGVERIFY)".dimmed()
+            "    => {}: {} (Log: {:?})",
+            "Execution Result".bold(),
+            if script_f1_success {
+                "PASSED ✅".bold().green()
+            } else {
+                "FAILED ❌".bold().red()
+            },
+            exec_result_f1
         );
+        if !script_f1_success {
+            println!(
+                "       {}",
+                "(Toy Note: Failure might be due to OP_CHECKSIGVERIFY)".dimmed()
+            );
+        }
     }
-    thread::sleep(Duration::from_millis(500));
+    if !auto {
+        thread::sleep(Duration::from_millis(500));
+    }
 
     // --- Construct and Execute Full Script for Step F2 ---
-    println!(
-        "\n{}: Executing Full Script Step F2 (Flow d={})...",
-        "Operator Action".bold().blue(),
-        flow_id
-    );
-    thread::sleep(Duration::from_millis(300));
+    if !auto {
+        println!(
+            "\n{}: Executing Full Script Step F2 (Flow d={})...",
+            "Operator Action".bold().blue(),
+            flow_id
+        );
+        thread::sleep(Duration::from_millis(300));
+    }
 
     let witness_script_f2 = {
         let mut builder = Builder::new();
@@ -468,35 +529,43 @@ pub fn online_execution(
     let mut full_script_bytes_f2 = witness_script_f2.to_bytes();
     full_script_bytes_f2.extend(step_f2.locking_script.to_bytes());
     let full_script_f2 = ScriptBuf::from_bytes(full_script_bytes_f2);
-    println!(
-        "  {} Full Script F2: {}",
-        "Info:".dimmed(),
-        full_script_f2.to_asm_string().italic()
-    );
+    if !auto {
+        println!(
+            "  {} Full Script F2: {}",
+            "Info:".dimmed(),
+            full_script_f2.to_asm_string().italic()
+        );
+    }
 
     let exec_result_f2 = execute_script_buf(full_script_f2.clone());
     let script_f2_success = exec_result_f2.success;
-    println!(
-        "    => {}: {} (Log: {:?})",
-        "Execution Result".bold(),
-        if script_f2_success {
-            "PASSED ✅".bold().green()
-        } else {
-            "FAILED ❌".bold().red()
-        },
-        exec_result_f2
-    );
-    if !script_f2_success {
+    if !auto {
         println!(
-            "       {}",
-            "(Toy Note: Failure might be due to OP_CHECKSIGVERIFY)".dimmed()
+            "    => {}: {} (Log: {:?})",
+            "Execution Result".bold(),
+            if script_f2_success {
+                "PASSED ✅".bold().green()
+            } else {
+                "FAILED ❌".bold().red()
+            },
+            exec_result_f2
         );
+        if !script_f2_success {
+            println!(
+                "       {}",
+                "(Toy Note: Failure might be due to OP_CHECKSIGVERIFY)".dimmed()
+            );
+        }
     }
-    thread::sleep(Duration::from_millis(500));
+    if !auto {
+        thread::sleep(Duration::from_millis(500));
+    }
 
     // Determine Overall Simulation Success
     let overall_success = script_f1_success && script_f2_success;
-    println!("\n{}", "--- Online Execution Complete ---".yellow());
+    if !auto {
+        println!("\n{}", "--- Online Execution Complete ---".yellow());
+    }
 
     // Create the final simulation result message
     let result_message = if overall_success {
@@ -524,6 +593,7 @@ pub fn online_execution(
 /// # Arguments
 /// * `config` - The `ColliderVmConfig` parameters for the simulation.
 /// * `input_value` - The input `x` to be used in the online phase.
+/// * `auto` - Whether to run in auto mode (skipping sleeps and prompts).
 ///
 /// # Returns
 /// * `Ok(SimulationResult)` - The final result of the simulation.
@@ -531,12 +601,20 @@ pub fn online_execution(
 pub fn run_simulation(
     config: ColliderVmConfig,
     input_value: u32,
+    auto: bool,
 ) -> Result<SimulationResult, Box<dyn Error>> {
     // --- Phase 1: Offline Setup ---
-    let (signers, operators, presigned_flows) = offline_setup(&config)?;
+    let (signers, operators, presigned_flows) = offline_setup(&config, auto)?;
 
     // --- Phase 2: Online Execution ---
-    let result = online_execution(&signers, &operators, &presigned_flows, &config, input_value)?;
+    let result = online_execution(
+        &signers,
+        &operators,
+        &presigned_flows,
+        &config,
+        input_value,
+        auto,
+    )?;
 
     // --- Phase 3: Report Summary (in main.rs) ---
     // println!("\n--- Simulation Summary ---"); // Moved to main.rs
