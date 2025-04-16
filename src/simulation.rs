@@ -8,7 +8,7 @@ use bitcoin::{
     blockdata::script::{Builder, ScriptBuf},
     script::PushBytesBuf,
 };
-use bitvm::execute_script_buf;
+use bitvm::{execute_script_buf, hash::blake3::blake3_push_message_script_with_limb};
 use secp256k1::{Keypair, Secp256k1};
 
 use crate::collidervm_toy::{
@@ -255,24 +255,21 @@ pub fn online_execution(
     let r_4b0_buf_f1 = PushBytesBuf::try_from(r_4b0.to_vec()).expect("r_4b0 conversion failed");
     let x_le_4_buf_f1 = PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed");
 
+    let message = [
+        0x7b, 0x00, 0x00, 0x00, 0xd9, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
+
     // -- Step F1 script
     let witness_f1 = {
         let mut b = Builder::new();
-        //b = b.push_slice(r_4b1_buf_f1); // Nonce part 1
-        //b = b.push_slice(r_4b0_buf_f1); // Nonce part 0
-        //b = b.push_slice(x_le_4_buf_f1); // x as 4 bytes (for hashing)
-        b = b.push_int(input_value as i64); // x as number (minimal, for comparison)
-        b = b.push_slice(sig_f1_buf); // Signature
+        b = b.push_int(input_value as i64);
+        b = b.push_slice(sig_f1_buf);
         b.into_script()
     };
 
-    // Debug the witness script
-    println!("Debug - F1 witness: {}", witness_f1);
-
-    // Debug the locking script
-    //println!("Debug - F1 locking: {}", step_f1.locking_script);
-
-    let mut full_f1 = witness_f1.to_bytes();
+    let mut full_f1 = push_compiled.to_bytes();
+    full_f1.extend(witness_f1.to_bytes());
     full_f1.extend(step_f1.locking_script.to_bytes());
     let exec_f1_script = ScriptBuf::from_bytes(full_f1);
 
@@ -293,16 +290,21 @@ pub fn online_execution(
         PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed for F2");
 
     // -- Step F2 script
+    let message = [
+        0x7b, 0x00, 0x00, 0x00, 0xd9, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
+
+    // -- Step F1 script
     let witness_f2 = {
         let mut b = Builder::new();
-        //b = b.push_slice(r_4b1_buf_f2); // Nonce part 1
-        //b = b.push_slice(r_4b0_buf_f2); // Nonce part 0
-        //b = b.push_slice(x_le_4_buf_f2); // x as 4 bytes (for hashing)
-        b = b.push_int(input_value as i64); // x as number (minimal, for comparison)
-        b = b.push_slice(sig_f2_buf); // Signature
+        b = b.push_int(input_value as i64);
+        b = b.push_slice(sig_f2_buf);
         b.into_script()
     };
-    let mut full_f2 = witness_f2.to_bytes();
+
+    let mut full_f2 = push_compiled.to_bytes();
+    full_f2.extend(witness_f2.to_bytes());
     full_f2.extend(step_f2.locking_script.to_bytes());
     let exec_f2_script = ScriptBuf::from_bytes(full_f2);
 
