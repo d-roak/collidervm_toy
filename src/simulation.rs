@@ -196,7 +196,7 @@ pub fn online_execution(
     println!("Input x={}", input_value);
 
     // 1) find a valid nonce => flow_id
-    let (nonce, flow_id) = find_valid_nonce(input_value, config.b, config.l)?;
+    let (nonce, _hash, flow_id) = find_valid_nonce(input_value, config.b, config.l)?;
     println!("Found nonce={} => flow_id={}", nonce, flow_id);
 
     // retrieve that presigned flow

@@ -83,7 +83,7 @@ pub fn calculate_flow_id(
     nonce: u64,
     b_bits: usize,
     l_bits: usize,
-) -> Result<u32, String> {
+) -> Result<(u32, [u8; 32]), String> {
     let mut hasher = Hasher::new();
     hasher.update(&input.to_le_bytes());
     hasher.update(&nonce.to_le_bytes());
@@ -102,7 +102,7 @@ pub fn calculate_flow_id(
 
     let max_flow_id = (1u64 << l_bits) as u32;
     if prefix_b < max_flow_id {
-        Ok(prefix_b)
+        Ok((prefix_b, hash.as_bytes()[0..32].try_into().unwrap()))
     } else {
         Err(format!(
             "Hash prefix {} (from H={}) >= {} (out of range)",
@@ -112,7 +112,11 @@ pub fn calculate_flow_id(
 }
 
 /// Offchain search for a valid nonce
-pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64, u32), String> {
+pub fn find_valid_nonce(
+    input: u32,
+    b_bits: usize,
+    l_bits: usize,
+) -> Result<(u64, [u8; 32], u32), String> {
     let expected_attempts = 1u64
         .checked_shl((b_bits.saturating_sub(l_bits)) as u32)
         .unwrap_or(u64::MAX);
@@ -127,14 +131,14 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
     let mut nonce = 0u64;
     loop {
         match calculate_flow_id(input, nonce, b_bits, l_bits) {
-            Ok(flow_id) => {
+            Ok((flow_id, hash)) => {
                 let dt = start.elapsed().as_secs_f64();
                 let rate = if dt > 0.0 { nonce as f64 / dt } else { 0.0 };
                 println!(
                     "Found flow_id={} at nonce={}, ~{:.2} H/s",
                     flow_id, nonce, rate
                 );
-                return Ok((nonce, flow_id));
+                return Ok((nonce, hash, flow_id));
             }
             Err(_) => {
                 nonce = nonce.checked_add(1).ok_or("nonce overflow!")?;
@@ -442,10 +446,10 @@ mod tests {
         let signer_pubkey = PublicKey::new(pk);
 
         // ColliderVM parameters
-        let b = 32;
+        let b = 16;
         let l = 4;
         let input_value = 123u32;
-        let (nonce, flow_id) = find_valid_nonce(input_value, b, l).unwrap();
+        let (nonce, hash, flow_id) = find_valid_nonce(input_value, b, l).unwrap();
 
         let flow_id_prefix: Vec<u8> = flow_id_to_prefix_bytes(flow_id, b);
         println!("flow_id: {}", flow_id);
@@ -454,7 +458,7 @@ mod tests {
             hex::encode(flow_id_prefix.clone())
         );
         println!("nonce: {}", nonce);
-
+        println!("hash: {}", hex::encode(hash.clone()));
         // Create a dummy transaction signature
         let sighash_f1 = create_dummy_sighash_message(&flow_id_prefix.clone());
         let sig_f1 = secp.sign_schnorr(&sighash_f1, &signer_keypair);
@@ -484,7 +488,16 @@ mod tests {
             .into_script();
 
         // 4) BLAKE3 compute snippet - OPTIMIZED
-        let push_compiled = blake3_push_message_script_with_limb(&[], limb_len).compile();
+        // Construct the message to be hashed, similar to the calculate_flow_id function
+        // input is 4 bytes, nonce is 8 bytes
+        let message = [
+            input_value.to_le_bytes(),
+            nonce.to_le_bytes()[0..4].try_into().unwrap(),
+            nonce.to_le_bytes()[4..8].try_into().unwrap(),
+        ]
+        .concat();
+        println!("message: {}", hex::encode(message.clone()));
+        let push_compiled = blake3_push_message_script_with_limb(&message, limb_len).compile();
         let push_script = ScriptBuf::from_bytes(push_compiled.to_bytes());
 
         let compute_compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
@@ -512,13 +525,13 @@ mod tests {
         let f1_locking_script = combine_scripts(&[
             sig_check,
             x_greater_check,
-            //reorder_for_blake,
-            //push_script,
-            //compute_script,
+            reorder_for_blake,
+            push_script,
+            compute_script,
             //drop_script,
             //prefix_script,
             //script! {OP_DROP OP_DROP OP_DROP OP_DROP}.compile(),
-            //success_script,
+            success_script,
         ]);
 
         // Construct the witness
@@ -533,9 +546,9 @@ mod tests {
         let r_4b1 = &r_le_8[4..8];
 
         // Print debugging info about the data
-        println!("r_4b0 = {:?}", r_4b0);
-        println!("r_4b1 = {:?}", r_4b1);
-        println!("x_le_4 = {:?}", x_le_4);
+        println!("r_4b0 = {}", hex::encode(r_4b0));
+        println!("r_4b1 = {}", hex::encode(r_4b1));
+        println!("x_le_4 = {}", hex::encode(x_le_4));
 
         // Create PushBytesBuf for all raw bytes for F1
         let sig_f1_buf =
@@ -546,13 +559,19 @@ mod tests {
             PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed");
 
         // -- Step F1 script
+        // let witness_f1 = {
+        //     let mut b = Builder::new();
+        //     b = b.push_slice(sig_f1_buf); // Signature
+        //     b = b.push_slice(r_4b1_buf_f1); // Nonce part 1
+        //     b = b.push_slice(r_4b0_buf_f1); // Nonce part 0
+        //     b = b.push_slice(x_le_4_buf_f1); // x as 4 bytes (for hashing)
+        //     b = b.push_int(input_value as i64); // x as number (minimal, for comparison)
+        //     b.into_script()
+        // };
         let witness_f1 = {
             let mut b = Builder::new();
-            b = b.push_slice(sig_f1_buf); // Signature
-            b = b.push_slice(r_4b1_buf_f1); // Nonce part 1
-            b = b.push_slice(r_4b0_buf_f1); // Nonce part 0
-            b = b.push_slice(x_le_4_buf_f1); // x as 4 bytes (for hashing)
-            b = b.push_int(input_value as i64); // x as number (minimal, for comparison)
+            b = b.push_int(input_value as i64);
+            b = b.push_slice(sig_f1_buf);
             b.into_script()
         };
 
@@ -562,6 +581,8 @@ mod tests {
         let mut full_f1 = witness_f1.to_bytes();
         full_f1.extend(f1_locking_script.to_bytes());
         let exec_f1_script = ScriptBuf::from_bytes(full_f1);
+
+        //println!("F1 script: {}", exec_f1_script);
 
         let f1_res = execute_script_buf(exec_f1_script);
         println!("F1 => success={}", f1_res.success);
