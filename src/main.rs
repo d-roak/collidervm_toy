@@ -96,15 +96,20 @@ impl Preset {
                 let mut b = calculate_b_param(hash_rate, l, target_s);
                 // Make it 2 bits harder
                 b += 2;
-                if b > 32 {
-                    b = 32;
+
+                // Round UP to the nearest multiple of 8, but cap at 32
+                if b % 8 != 0 {
+                    b += 8 - (b % 8); // Round up
                 }
-                b -= b % 8;
+                if b > 32 {
+                    b = 32; // Cap at 32
+                }
+
                 ColliderVmConfig {
                     n: 3,
                     m: 2,
                     l,
-                    b,
+                    b, // Use the adjusted b
                     k: 2,
                 }
             }

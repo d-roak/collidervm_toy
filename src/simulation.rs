@@ -266,7 +266,7 @@ pub fn online_execution(
         "Operator Action".bold().blue(),
         input_value
     );
-    let (nonce, _hash, flow_id) = find_valid_nonce(input_value, config.b, config.l)?;
+    let (nonce, flow_id, _hash) = find_valid_nonce(input_value, config.b, config.l)?;
     println!(
         "  {} Nonce (r): {}, Required Flow ID (d): {}",
         "Found!".bold().green(),

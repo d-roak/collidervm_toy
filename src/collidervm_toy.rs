@@ -110,39 +110,182 @@ pub fn calculate_flow_id(
     }
 }
 
-/// Offchain search for a valid nonce
+/// Finds a valid nonce `r` for a given input `x` such that `H(x, r)|_B` falls within the set `D`. (Off-chain logic)
+///
+/// This simulates the work performed by an Operator during the online phase.
+/// The expected number of hash attempts is `2^(B-L)`.
+///
+/// # Arguments
+/// * `input` - The input value `x`.
+/// * `b_bits` - The hash prefix length `B`.
+/// * `l_bits` - The parameter `L` defining the size of set `D`.
+///
+/// # Returns
+/// * `Ok((u64, u32))` - A tuple containing the found nonce `r` and the corresponding flow ID `d`.
+/// * `Err(String)` - An error if a nonce cannot be found (e.g., due to overflow or excessive attempts).
 pub fn find_valid_nonce(
     input: u32,
     b_bits: usize,
     l_bits: usize,
-) -> Result<(u64, [u8; 32], u32), String> {
-    let expected_attempts = 1u64
-        .checked_shl((b_bits.saturating_sub(l_bits)) as u32)
+) -> Result<(u64, u32, [u8; 32]), String> {
+    let mut nonce: u64 = 0;
+
+    // Calculate expected number of attempts (2^(B-L)) for progress reporting
+    let expected_attempts: u64 = 1u64
+        .checked_shl((b_bits.saturating_sub(l_bits)) as u32) // Calculate 2^(B-L)
         .unwrap_or(u64::MAX);
 
     println!(
-        "find_valid_nonce => expected ~2^{} = {} tries",
+        "Finding valid nonce (L={}, B={})... (Expected work: ~2^{} = {} hashes)",
+        l_bits,
+        b_bits,
         b_bits.saturating_sub(l_bits),
         expected_attempts
     );
 
-    let start = Instant::now();
-    let mut nonce = 0u64;
+    // Create a progress bar with expected attempts
+    let progress_bar = if expected_attempts > 100 {
+        let pb = ProgressBar::new(expected_attempts);
+
+        // More attractive and informative template
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] {pos}/{len} ({percent}%) [{per_sec}] {msg}")
+                .unwrap()
+                .progress_chars("■□·")
+        );
+
+        pb.set_message("Finding nonce for valid flow...");
+        pb.enable_steady_tick(Duration::from_millis(100)); // Update the spinner every 100ms to show activity
+        Some(pb)
+    } else {
+        None
+    };
+
+    // Variables for hash rate calculation
+    let start_time = Instant::now();
+    let report_interval = 50_000; // Update progress every 50K hashes
+    let mut last_update = 0;
+    let mut hash_rates = Vec::with_capacity(10); // Store last 10 hash rates for averaging
+
     loop {
+        // Check if the current nonce yields a valid flow ID
         match calculate_flow_id(input, nonce, b_bits, l_bits) {
             Ok((flow_id, hash)) => {
-                let dt = start.elapsed().as_secs_f64();
-                let rate = if dt > 0.0 { nonce as f64 / dt } else { 0.0 };
-                println!(
-                    "Found flow_id={} at nonce={}, ~{:.2} H/s",
-                    flow_id, nonce, rate
-                );
-                return Ok((nonce, hash, flow_id));
+                // Found a nonce `r` such that H(x, r)|_B = d ∈ D
+                if let Some(pb) = &progress_bar {
+                    pb.finish_with_message(format!(
+                        "Found flow_id {} after {} hashes!",
+                        flow_id,
+                        nonce + 1
+                    ));
+                } else {
+                    println!(
+                        "  Found valid nonce {} -> flow_id {} after {} hashes.",
+                        nonce,
+                        flow_id,
+                        nonce + 1 // nonce starts at 0
+                    );
+                }
+
+                // Calculate and display the final hash rate
+                let elapsed = start_time.elapsed();
+                let hash_rate = if elapsed.as_secs() > 0 {
+                    nonce as f64 / elapsed.as_secs_f64()
+                } else {
+                    nonce as f64 // avoid division by zero
+                };
+
+                println!("  Average hash rate: {:.2} hashes/sec", hash_rate);
+
+                return Ok((nonce, flow_id, hash));
             }
             Err(_) => {
-                nonce = nonce.checked_add(1).ok_or("nonce overflow!")?;
+                // Hash prefix was outside the valid range [0, 2^L - 1], try next nonce
+                if nonce > last_update + report_interval {
+                    // Calculate current hash rate
+                    let elapsed = start_time.elapsed();
+                    let hash_rate = if elapsed.as_secs() > 0 {
+                        nonce as f64 / elapsed.as_secs_f64()
+                    } else {
+                        nonce as f64 // avoid division by zero
+                    };
+
+                    // Keep track of hash rates for averaging
+                    hash_rates.push(hash_rate);
+                    if hash_rates.len() > 10 {
+                        hash_rates.remove(0);
+                    }
+                    let avg_hash_rate: f64 =
+                        hash_rates.iter().sum::<f64>() / hash_rates.len() as f64;
+
+                    // Update progress bar with current rate and ETA
+                    if let Some(pb) = &progress_bar {
+                        pb.set_position(nonce);
+
+                        // More detailed progress message
+                        let eta_secs = if nonce >= expected_attempts {
+                            0.0
+                        } else {
+                            (expected_attempts - nonce) as f64 / avg_hash_rate
+                        };
+
+                        let eta_str = if eta_secs < 60.0 {
+                            format!("{:.1}s", eta_secs)
+                        } else if eta_secs < 3600.0 {
+                            format!("{:.1}m {:.0}s", eta_secs / 60.0, eta_secs % 60.0)
+                        } else {
+                            format!(
+                                "{:.1}h {:.0}m",
+                                eta_secs / 3600.0,
+                                (eta_secs % 3600.0) / 60.0
+                            )
+                        };
+
+                        pb.set_message(format!(
+                            "ETA: {} @ {:.2} KH/s, {:.1}% done",
+                            eta_str,
+                            avg_hash_rate / 1000.0,
+                            (nonce as f64 / expected_attempts as f64) * 100.0
+                        ));
+                    } else {
+                        println!("  Tried {} hashes... ({:.2} hash/s)", nonce, avg_hash_rate);
+                    }
+
+                    last_update = nonce;
+                }
+
+                // Update progress bar more frequently (without recalculating hash rate)
+                if let Some(pb) = &progress_bar {
+                    // Update the progress bar more frequently for high workloads
+                    let update_frequency = if expected_attempts > 1_000_000 {
+                        5_000 // Every 5K hashes for large workloads
+                    } else if expected_attempts > 100_000 {
+                        1_000 // Every 1K hashes for medium workloads
+                    } else {
+                        100 // Every 100 hashes for small workloads
+                    };
+
+                    if nonce % update_frequency == 0 {
+                        pb.set_position(nonce);
+                    }
+                }
+
+                // Increment nonce, checking for overflow
+                nonce = nonce
+                    .checked_add(1)
+                    .ok_or_else(|| "Nonce overflowed u64::MAX while searching".to_string())?;
+
+                // Safety break after excessive attempts (e.g., 100x expected work)
+                // This prevents infinite loops in case of configuration errors.
                 if nonce > expected_attempts.saturating_mul(100) {
-                    return Err("Could not find valid flow_id within 100x expected".to_owned());
+                    if let Some(pb) = &progress_bar {
+                        pb.finish_with_message("Exceeded maximum attempts");
+                    }
+                    return Err(format!(
+                        "Could not find a valid nonce after {} attempts (expected ~{})",
+                        nonce, expected_attempts
+                    ));
                 }
             }
         }
@@ -453,16 +596,10 @@ mod tests {
         let b = 16;
         let l = 4;
         let input_value = 123u32;
-        let (nonce, hash, flow_id) = find_valid_nonce(input_value, b, l).unwrap();
+        let (nonce, flow_id, _hash) = find_valid_nonce(input_value, b, l).unwrap();
 
         let flow_id_prefix: Vec<u8> = flow_id_to_prefix_bytes(flow_id, b);
-        println!("flow_id: {}", flow_id);
-        println!(
-            "flow_id_prefix bytes: {}",
-            hex::encode(flow_id_prefix.clone())
-        );
-        println!("nonce: {}", nonce);
-        println!("hash: {}", hex::encode(hash.clone()));
+
         // Create a dummy transaction signature
         let sighash_f1 = create_dummy_sighash_message(&flow_id_prefix.clone());
         let sig_f1 = secp.sign_schnorr(&sighash_f1, &signer_keypair);
@@ -663,16 +800,10 @@ mod tests {
         let b = 16;
         let l = 4;
         let input_value = 123u32;
-        let (nonce, hash, flow_id) = find_valid_nonce(input_value, b, l).unwrap();
+        let (nonce, flow_id, _hash) = find_valid_nonce(input_value, b, l).unwrap();
 
         let flow_id_prefix: Vec<u8> = flow_id_to_prefix_bytes(flow_id, b);
-        println!("flow_id: {}", flow_id);
-        println!(
-            "flow_id_prefix bytes: {}",
-            hex::encode(flow_id_prefix.clone())
-        );
-        println!("nonce: {}", nonce);
-        println!("hash: {}", hex::encode(hash.clone()));
+
         // Create a dummy transaction signature
         let sighash_f1 = create_dummy_sighash_message(&flow_id_prefix.clone());
         let sig_f1 = secp.sign_schnorr(&sighash_f1, &signer_keypair);
