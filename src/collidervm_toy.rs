@@ -1,9 +1,11 @@
 use bitcoin::{
     Amount, PublicKey, Transaction, XOnlyPublicKey,
     blockdata::script::{Builder, ScriptBuf},
-    opcodes,
+    opcodes::{self, OP_TRUE},
 };
 use bitcoin_hashes::{HashEngine, sha256};
+use bitcoin_script_stack::optimizer;
+use bitvm::hash::blake3::blake3_compute_script_with_limb;
 use blake3::Hasher;
 use indicatif::{ProgressBar, ProgressStyle};
 use secp256k1::{Keypair, Message, SecretKey, schnorr::Signature};
@@ -12,156 +14,97 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Threshold value for the F1 subfunction logic check.
-/// In this toy simulation, F1 succeeds if the input `x` is greater than this value.
-const F1_THRESHOLD: u32 = 100;
-/// Threshold value for the F2 subfunction logic check.
-/// In this toy simulation, F2 succeeds if the input `x` is less than this value.
-const F2_THRESHOLD: u32 = 200;
+/// F1 threshold: x must be > 100
+pub const F1_THRESHOLD: u32 = 100;
+/// F2 threshold: x must be < 200
+pub const F2_THRESHOLD: u32 = 200;
 
-/// Configuration parameters for the ColliderVM simulation.
-/// These parameters define the security assumptions and computational requirements.
+/// ColliderVM parameters
 #[derive(Debug, Clone)]
 pub struct ColliderVmConfig {
-    /// Number of signers (`n`). Security requires 1-of-n honest signers.
     pub n: usize,
-    /// Number of operators (`m`). Liveness requires 1-of-m honest operators.
     pub m: usize,
-    /// Logarithm base 2 of the size of the set `D` of valid flow IDs (`L`). |D| = 2^L.
     pub l: usize,
-    /// Length of the hash prefix in bits (`B`) used in the collision challenge.
-    pub b: usize,
-    /// Number of sub-functions (`k`) the main function is split into. Fixed to 2 (F1, F2) for this toy simulation.
+    pub b: usize, // must be <= 32
     pub k: usize,
 }
 
-/// Represents a Signer in the ColliderVM protocol.
-/// Signers participate in the offline setup phase to create and sign transaction templates.
+/// Info for one Signer
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields might be unused in the toy version
+#[allow(dead_code)]
 pub struct SignerInfo {
-    /// Unique identifier for the signer.
     pub id: usize,
-    /// The signer's public key.
     pub pubkey: PublicKey,
-    /// The signer's secp256k1 keypair (includes private key).
     pub keypair: Keypair,
-    /// The signer's x-only public key, used for Schnorr signatures.
     pub xonly: XOnlyPublicKey,
-    /// The signer's private key (kept for simulation purposes, should be deleted in a real scenario).
     pub privkey: SecretKey,
 }
 
-/// Represents an Operator in the ColliderVM protocol.
-/// Operators participate in the online execution phase, providing inputs, finding nonces,
-/// and broadcasting transactions.
+/// Info for one Operator
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields might be unused in the toy version
+#[allow(dead_code)]
 pub struct OperatorInfo {
-    /// Unique identifier for the operator.
     pub id: usize,
-    /// The operator's public key.
     pub pubkey: PublicKey,
-    /// The operator's private key (kept for simulation purposes).
     pub privkey: SecretKey,
 }
 
-/// Represents a single step (e.g., F1 or F2 execution) within a presigned flow.
-/// Contains the transaction template, sighash, signatures, and locking script for that step.
+/// A single step in the protocol
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Fields might be unused in the toy version
+#[allow(dead_code)]
 pub struct PresignedStep {
-    /// The presigned Bitcoin transaction template for this step.
     pub tx_template: Transaction,
-    /// The message hash that was signed by the signers (simplified in this toy simulation).
     pub sighash_message: Message,
-    /// A map from signer public key (bytes) to their Schnorr signature for this step.
     pub signatures: HashMap<Vec<u8>, Signature>,
-    /// The locking script (`scriptPubKey`) for the output created by this step's transaction.
     pub locking_script: ScriptBuf,
 }
 
-/// Represents a complete presigned flow for a specific flow ID (`d`).
-/// A flow consists of a sequence of steps (transactions) designed to execute the sub-functions.
+/// A flow for a specific flow_id
 #[derive(Clone, Debug)]
-#[allow(dead_code)] // Fields might be unused in the toy version
+#[allow(dead_code)]
 pub struct PresignedFlow {
-    /// The unique identifier (`d`) for this flow, belonging to the set `D`.
     pub flow_id: u32,
-    /// The sequence of presigned steps (e.g., [step_f1, step_f2]) constituting this flow.
     pub steps: Vec<PresignedStep>,
 }
 
-/// Creates a simplified message digest to be signed, representing the core commitment.
-///
-/// In a real Bitcoin transaction, the sighash message is constructed according to complex rules
-/// (see BIP-341 for Taproot). This function provides a placeholder by hashing the locking script
-/// and the output value, simulating the commitment to the transaction's essential parts.
-///
-/// # Arguments
-/// * `locking_script` - The scriptPubKey of the output being spent.
-/// * `value` - The value of the output being spent.
-///
-/// # Returns
-/// A `secp256k1::Message` suitable for Schnorr signing.
+/// Create a minimal sighash for demonstration
 pub fn create_toy_sighash_message(locking_script: &ScriptBuf, value: Amount) -> Message {
     let mut engine = sha256::HashEngine::default();
     engine.input(&locking_script.to_bytes());
     engine.input(&value.to_sat().to_le_bytes());
-    let hash = sha256::Hash::from_engine(engine);
-    Message::from_digest(hash.to_byte_array())
+    let digest = sha256::Hash::from_engine(engine);
+    Message::from_digest(digest.to_byte_array())
 }
 
-/// Calculates the flow ID (`d`) from an input (`x`) and nonce (`r`). (Off-chain logic)
-///
-/// This simulates the core hash collision challenge `H(x, r)|_B = d`, where `H` is Blake3.
-/// It checks if the `B`-bit prefix of the hash falls within the valid range `[0, 2^L - 1]`, which defines the set `D`.
-///
-/// # Arguments
-/// * `input` - The input value `x` for the computation.
-/// * `nonce` - The nonce `r` found by the operator.
-/// * `b_bits` - The number of bits (`B`) in the hash prefix.
-/// * `l_bits` - The number of bits (`L`) defining the size of the set `D` (2^L).
-///
-/// # Returns
-/// * `Ok(u32)` - The calculated flow ID `d` if the hash prefix is within the valid range `D`.
-/// * `Err(String)` - An error message if the hash prefix is outside the valid range.
+/// Calculate H(x||nonce)|_B => flow_id
 pub fn calculate_flow_id(
     input: u32,
     nonce: u64,
     b_bits: usize,
     l_bits: usize,
-) -> Result<u32, String> {
-    // Compute H(input || nonce) using Blake3
+) -> Result<(u32, [u8; 32]), String> {
     let mut hasher = Hasher::new();
     hasher.update(&input.to_le_bytes());
     hasher.update(&nonce.to_le_bytes());
     let hash = hasher.finalize();
 
-    // Extract the first 4 bytes of the hash as a u32
-    let mut bytes = [0u8; 4];
-    bytes.copy_from_slice(&hash.as_bytes()[0..4]);
-    let hash_u32 = u32::from_le_bytes(bytes);
+    let mut fourb = [0u8; 4];
+    fourb.copy_from_slice(&hash.as_bytes()[0..4]);
+    let hash_u32 = u32::from_le_bytes(fourb);
 
-    // Create a bitmask for the first B bits
     let mask_b = if b_bits >= 32 {
-        u32::MAX // Avoid overflow if b_bits >= 32
+        u32::MAX
     } else {
-        (1u32 << b_bits).saturating_sub(1) // Generates 0b11...1 (B times)
+        (1u32 << b_bits) - 1
     };
-
-    // Extract the B-bit prefix
     let prefix_b = hash_u32 & mask_b;
 
-    // Calculate the maximum valid flow ID (size of set D = 2^L)
     let max_flow_id = (1u64 << l_bits) as u32;
-
-    // Check if the prefix falls within the valid set D = [0, 2^L - 1]
     if prefix_b < max_flow_id {
-        Ok(prefix_b) // This is a valid flow ID `d`
+        Ok((prefix_b, hash.as_bytes()[0..32].try_into().unwrap()))
     } else {
         Err(format!(
-            "Hash prefix {} (from hash {}) is outside the valid flow ID range [0, {})",
+            "Hash prefix {} (from H={}) >= {} (out of range)",
             prefix_b, hash, max_flow_id
         ))
     }
@@ -180,7 +123,11 @@ pub fn calculate_flow_id(
 /// # Returns
 /// * `Ok((u64, u32))` - A tuple containing the found nonce `r` and the corresponding flow ID `d`.
 /// * `Err(String)` - An error if a nonce cannot be found (e.g., due to overflow or excessive attempts).
-pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64, u32), String> {
+pub fn find_valid_nonce(
+    input: u32,
+    b_bits: usize,
+    l_bits: usize,
+) -> Result<(u64, u32, [u8; 32]), String> {
     let mut nonce: u64 = 0;
 
     // Calculate expected number of attempts (2^(B-L)) for progress reporting
@@ -224,7 +171,7 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
     loop {
         // Check if the current nonce yields a valid flow ID
         match calculate_flow_id(input, nonce, b_bits, l_bits) {
-            Ok(flow_id) => {
+            Ok((flow_id, hash)) => {
                 // Found a nonce `r` such that H(x, r)|_B = d ∈ D
                 if let Some(pb) = &progress_bar {
                     pb.finish_with_message(format!(
@@ -251,7 +198,7 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
 
                 println!("  Average hash rate: {:.2} hashes/sec", hash_rate);
 
-                return Ok((nonce, flow_id));
+                return Ok((nonce, flow_id, hash));
             }
             Err(_) => {
                 // Hash prefix was outside the valid range [0, 2^L - 1], try next nonce
@@ -345,182 +292,233 @@ pub fn find_valid_nonce(input: u32, b_bits: usize, l_bits: usize) -> Result<(u64
     }
 }
 
-/// Builds the complete locking script for the F1 sub-function.
-///
-/// This script enforces three conditions when being spent:
-/// 1.  **Signature Check:** Verifies a signature from the designated signer.
-/// 2.  **Hash Prefix Check:** Verifies that the flow ID provided in the witness matches the `flow_id` hardcoded in this script.
-/// 3.  **Logic Check:** Verifies that the input `x` satisfies the F1 condition (`x > F1_THRESHOLD`).
-///
-/// The expected witness stack is: `<signature> <flow_id> <input_x>`
-///
-/// # Arguments
-/// * `signer_pubkey` - The public key of the signer whose signature is required.
-/// * `flow_id` - The specific flow ID (`d`) associated with this script.
-/// * `_b_bits` - The hash prefix length `B` (parameter kept for consistency, but the hash check logic is simplified here).
-///
-/// # Returns
-/// A `ScriptBuf` representing the locking script for the F1 transaction output.
-pub fn build_script_f1_locked(
-    signer_pubkey: &PublicKey,
-    flow_id: u32,
-    _b_bits: usize, // Parameter kept for consistency, but logic is simplified here
-) -> ScriptBuf {
-    Builder::new()
-        // Stack: <sig> <flow_id> <input_x> --- Initial witness stack
-        // 3. F1 Logic Check: input_x > F1_THRESHOLD?
-        .push_int(F1_THRESHOLD as i64) // Push the threshold value
-        .push_opcode(opcodes::all::OP_GREATERTHAN) // Check if <input_x> > <F1_THRESHOLD>
-        .push_opcode(opcodes::all::OP_VERIFY) // Fail script if check is false
-        // Stack: <sig> <flow_id> --- Input `x` is consumed
-        // 2. Hash Prefix Check: flow_id == hardcoded_flow_id?
-        // This simulates checking `H(x, r)|_B = d` by directly comparing the flow_id `d`.
-        .push_int(flow_id as i64) // Push the hardcoded flow_id for this script
-        .push_opcode(opcodes::all::OP_EQUALVERIFY) // Check if <witness_flow_id> == <hardcoded_flow_id>
-        // Stack: <sig> --- Flow ID is consumed
-        // 1. Signature Check: Is the signature valid for this transaction?
-        .push_key(signer_pubkey) // Push the signer's public key
-        .push_opcode(opcodes::all::OP_CHECKSIGVERIFY) // Verify the signature against the pubkey and tx data
-        // Stack: <empty> --- Signature is consumed
-        // 4. Success: If all VERIFY ops passed, the script is valid.
-        .push_opcode(opcodes::OP_TRUE)
-        .into_script()
+/// Convert flow_id => little-endian prefix of length B/8
+pub fn flow_id_to_prefix_bytes(flow_id: u32, b_bits: usize) -> Vec<u8> {
+    assert!(b_bits <= 32);
+    assert_eq!(b_bits % 8, 0, "b_bits must be multiple of 8");
+    let prefix_len = b_bits / 8;
+    let le4 = flow_id.to_le_bytes();
+    let flow_id_prefix_bytes = le4[..prefix_len].to_vec();
+    // Transform to nibbles
+    // For example: [0x12, 0x34] => [0x1, 0x2, 0x3, 0x4]
+    // Or: [0x0d, 0x00] => [0x0, 0xd, 0x0, 0x0]
+    let mut nibbles = Vec::with_capacity(flow_id_prefix_bytes.len() * 2);
+    for &byte in &flow_id_prefix_bytes {
+        // Extract high nibble (first 4 bits)
+        nibbles.push((byte >> 4) & 0x0F);
+        // Extract low nibble (last 4 bits)
+        nibbles.push(byte & 0x0F);
+    }
+    nibbles
 }
 
-/// Builds the complete locking script for the F2 sub-function.
-///
-/// Similar to `build_script_f1_locked`, this enforces:
-/// 1.  Signature check.
-/// 2.  Hash prefix check (matching the hardcoded `flow_id`).
-/// 3.  F2 logic check (`x < F2_THRESHOLD`).
-///
-/// The expected witness stack is: `<signature> <flow_id> <input_x>`
-///
-/// # Arguments
-/// * `signer_pubkey` - The public key of the signer whose signature is required.
-/// * `flow_id` - The specific flow ID (`d`) associated with this script.
-/// * `_b_bits` - The hash prefix length `B` (parameter kept for consistency, but the hash check logic is simplified here).
-///
-/// # Returns
-/// A `ScriptBuf` representing the locking script for the F2 transaction output.
-pub fn build_script_f2_locked(
-    signer_pubkey: &PublicKey,
-    flow_id: u32,
-    _b_bits: usize, // Parameter kept for consistency, but logic is simplified here
-) -> ScriptBuf {
-    Builder::new()
-        // Stack: <sig> <flow_id> <input_x> --- Initial witness stack
-        // 3. F2 Logic Check: input_x < F2_THRESHOLD?
-        .push_int(F2_THRESHOLD as i64) // Push the threshold value
-        .push_opcode(opcodes::all::OP_LESSTHAN) // Check if <input_x> < <F2_THRESHOLD>
-        .push_opcode(opcodes::all::OP_VERIFY) // Fail script if check is false
-        // Stack: <sig> <flow_id> --- Input `x` is consumed
-        // 2. Hash Prefix Check: flow_id == hardcoded_flow_id?
-        // This simulates checking `H(x, r)|_B = d` by directly comparing the flow_id `d`.
-        .push_int(flow_id as i64) // Push the hardcoded flow_id for this script
-        .push_opcode(opcodes::all::OP_EQUALVERIFY) // Check if <witness_flow_id> == <hardcoded_flow_id>
-        // Stack: <sig> --- Flow ID is consumed
-        // 1. Signature Check: Is the signature valid for this transaction?
-        .push_key(signer_pubkey) // Push the signer's public key
-        .push_opcode(opcodes::all::OP_CHECKSIGVERIFY) // Verify the signature against the pubkey and tx data
-        // Stack: <empty> --- Signature is consumed
-        // 4. Success: If all VERIFY ops passed, the script is valid.
-        .push_opcode(opcodes::OP_TRUE)
-        .into_script()
+/// Helper: combine scripts (by just concatenating the raw bytes).
+fn combine_scripts(fragments: &[ScriptBuf]) -> ScriptBuf {
+    let mut combined = Vec::new();
+    for frag in fragments {
+        combined.extend(frag.to_bytes());
+    }
+    ScriptBuf::from_bytes(combined)
 }
 
-/// Benchmarks the hash rate of the current machine.
-///
-/// This function performs Blake3 hashing operations for a short period to measure
-/// the machine's hash performance. This helps calibrate the difficulty parameters
-/// for the ColliderVM simulation.
-///
-/// # Arguments
-/// * `duration_secs` - How long to run the benchmark in seconds
-///
-/// # Returns
-/// The average number of hashes per second achievable on this machine
+/// A small helper script that pushes `prefix_data` and does OP_EQUALVERIFY
+/// This is used to check if the top of the stack matches the prefix
+/// For example, if the content of the stack is:
+/// [0x00, 0x0d, 0x00, 0x00]
+/// Then the script needs to check equality of each byte.
+/// We need to take care of the fact that the prefix is now in nibbles.
+/// Also the ordering of elements on the stack.
+/// We need to push the prefix in reverse order to the stack.
+fn build_prefix_equalverify(prefix_data: &[u8]) -> ScriptBuf {
+    let mut b = Builder::new();
+
+    // Check each nibble individually, pushing in reverse order to match stack evaluation
+    for &nibble in prefix_data.iter().rev() {
+        // For the nibble value, use push_int for accurate stack comparison
+        b = b.push_int(nibble as i64);
+        b = b.push_opcode(opcodes::all::OP_EQUALVERIFY);
+    }
+
+    b.into_script()
+}
+
+/// Build an F1 script with onchain BLAKE3, checking x>F1_THRESHOLD and the top (b_bits/8) bytes match flow_id_prefix.
+/// For now we cheat and use the provided input and nonce to construct the message for the BLAKE3 hash.
+/// TODO: Reconstruct the message from the witness elements.
+pub fn build_script_f1_blake3_locked(
+    signer_pubkey: &PublicKey,
+    flow_id_prefix: &[u8],
+    _b_bits: usize,
+) -> ScriptBuf {
+    let prefix_len = flow_id_prefix.len();
+    let total_msg_len = 12; // x_4b + r_4b0 + r_4b1
+    let limb_len = 4;
+
+    // 1) Script to check signature
+    let sig_check = {
+        let mut b = Builder::new();
+        b = b.push_key(signer_pubkey);
+        b.push_opcode(opcodes::all::OP_CHECKSIGVERIFY).into_script()
+    };
+
+    // 2) Bring x_num to top, check x_num > 100
+    let x_greater_check = Builder::new()
+        .push_opcode(opcodes::all::OP_DUP)
+        .push_int(F1_THRESHOLD as i64)
+        .push_opcode(opcodes::all::OP_GREATERTHAN)
+        .push_opcode(opcodes::all::OP_VERIFY)
+        .into_script();
+
+    // 3) Drop x_num and reorder for BLAKE3
+    let reorder_for_blake = Builder::new()
+        .push_opcode(opcodes::all::OP_DROP)
+        .into_script();
+
+    // 4) BLAKE3 compute snippet - OPTIMIZED
+    // TODO: Reconstruct the message from the witness elements.
+    let compute_compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
+    let compute_optimized = optimizer::optimize(compute_compiled);
+    let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
+
+    // 5) drop limbs we don't need for prefix check
+    // Needed nibbles: prefix_len (because now represented as nibbles) or B / 4
+    let needed_nibbles = prefix_len;
+    let blake3_script_hash_len_nibbles = 64;
+    let to_drop = blake3_script_hash_len_nibbles - needed_nibbles;
+    let drop_script = {
+        let mut b = Builder::new();
+        for _ in 0..to_drop {
+            b = b.push_opcode(opcodes::all::OP_DROP);
+        }
+        b.into_script()
+    };
+
+    // 6) compare prefix => OP_EQUALVERIFY
+    let prefix_script = build_prefix_equalverify(flow_id_prefix);
+
+    // 7) push OP_TRUE
+    let success_script = Builder::new().push_opcode(OP_TRUE).into_script();
+
+    // Combine the locking script parts
+    combine_scripts(&[
+        sig_check,
+        x_greater_check,
+        reorder_for_blake,
+        compute_script,
+        drop_script,
+        prefix_script,
+        success_script,
+    ])
+}
+
+/// Build an F2 script with onchain BLAKE3, checking x<F2_THRESHOLD and prefix
+pub fn build_script_f2_blake3_locked(
+    signer_pubkey: &PublicKey,
+    flow_id_prefix: &[u8],
+    _b_bits: usize,
+) -> ScriptBuf {
+    let prefix_len = flow_id_prefix.len();
+    let total_msg_len = 12;
+    let limb_len = 4;
+
+    // 1) signature
+    let sig_check = Builder::new()
+        .push_key(signer_pubkey)
+        .push_opcode(opcodes::all::OP_CHECKSIGVERIFY)
+        .into_script();
+
+    // 2) Bring x_num to top, check x_num < 200
+    let x_less_check = Builder::new()
+        .push_opcode(opcodes::all::OP_DUP)
+        .push_int(F2_THRESHOLD as i64)
+        .push_opcode(opcodes::all::OP_LESSTHAN)
+        .push_opcode(opcodes::all::OP_VERIFY)
+        .into_script();
+
+    // 3) Drop x_num and reorder for BLAKE3
+    let reorder_for_blake = Builder::new()
+        .push_opcode(opcodes::all::OP_DROP)
+        .into_script();
+
+    // 4) BLAKE3 compute snippet - OPTIMIZED
+    let compute_script = {
+        let compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
+        // Important: Optimize the compute script
+        let optimized = optimizer::optimize(compiled);
+        ScriptBuf::from_bytes(optimized.to_bytes())
+    };
+
+    // Needed nibbles: prefix_len (because now represented as nibbles) or B / 4
+    let needed_nibbles = prefix_len;
+    let blake3_script_hash_len_nibbles = 64;
+    let to_drop = blake3_script_hash_len_nibbles - needed_nibbles;
+    let drop_script = {
+        let mut b = Builder::new();
+        for _ in 0..to_drop {
+            b = b.push_opcode(opcodes::all::OP_DROP);
+        }
+        b.into_script()
+    };
+
+    let prefix_script = build_prefix_equalverify(flow_id_prefix);
+
+    let success_script = Builder::new().push_opcode(OP_TRUE).into_script();
+
+    combine_scripts(&[
+        sig_check,
+        x_less_check,
+        reorder_for_blake,
+        compute_script,
+        drop_script,
+        prefix_script,
+        success_script,
+    ])
+}
+
+/// A basic "hash rate" calibration
 pub fn benchmark_hash_rate(duration_secs: u64) -> u64 {
-    println!(
-        "Calibrating hash rate... (running for {} seconds)",
-        duration_secs
-    );
-
-    // Create a progress bar
+    println!("Calibrating for {} seconds...", duration_secs);
     let pb = ProgressBar::new(100);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:50.cyan/blue}] {percent}% {msg}")
-            .unwrap()
-            .progress_chars("■□·"),
+            .template("{spinner} [{elapsed_precise}] [{bar:40.green/black}] {percent}% {msg}")
+            .unwrap(),
     );
-    pb.set_message("Measuring hash performance...");
     pb.enable_steady_tick(Duration::from_millis(100));
 
-    let start_time = Instant::now();
-    let end_time = start_time + Duration::from_secs(duration_secs);
+    let start = Instant::now();
+    let end = start + Duration::from_secs(duration_secs);
 
-    // Use 42 as a sample input value
-    let input = 42u32;
-    let mut nonce: u64 = 0;
-    let mut hash_count: u64 = 0;
+    let mut count = 0u64;
+    let mut nonce = 0u64;
+    let input = 123u32;
 
-    while Instant::now() < end_time {
-        // Compute H(input || nonce) using Blake3 - the core operation in find_valid_nonce
+    while Instant::now() < end {
         let mut hasher = Hasher::new();
         hasher.update(&input.to_le_bytes());
         hasher.update(&nonce.to_le_bytes());
-        let _hash = hasher.finalize();
-
-        hash_count += 1;
+        hasher.finalize();
         nonce += 1;
-
-        // Update progress bar periodically
-        if hash_count % 100_000 == 0 {
-            let elapsed = Instant::now().duration_since(start_time);
-            let progress = elapsed.as_secs_f64() / duration_secs as f64;
-            pb.set_position((progress * 100.0) as u64);
-
-            let current_rate = hash_count as f64 / elapsed.as_secs_f64();
-            pb.set_message(format!(
-                "{:.2} million hashes/sec",
-                current_rate / 1_000_000.0
-            ));
-        }
+        count += 1;
     }
 
-    let elapsed = Instant::now().duration_since(start_time);
-    let hash_rate = hash_count as f64 / elapsed.as_secs_f64();
-    let hash_rate_u64 = hash_rate as u64;
-
-    pb.finish_with_message(format!(
-        "Measured: {:.2} million hashes/sec",
-        hash_rate / 1_000_000.0
-    ));
-    println!(
-        "Hash rate calibration complete: {} hashes/sec",
-        hash_rate_u64
-    );
-
-    hash_rate_u64
+    let dt = start.elapsed().as_secs_f64();
+    let rate = if dt > 0.0 { count as f64 / dt } else { 0.0 };
+    pb.finish_with_message(format!("~{:.2} H/s", rate));
+    rate as u64
 }
 
 #[cfg(test)]
 mod tests {
-
-    use bitcoin_script_stack::optimizer;
+    use super::*;
+    use bitcoin::script::PushBytesBuf;
+    use bitcoin_script::script;
     use bitvm::{
         execute_script_buf,
-        hash::blake3::{
-            blake3_compute_script_with_limb, blake3_push_message_script_with_limb,
-            blake3_verify_output_script,
-        },
+        hash::blake3::{blake3_push_message_script_with_limb, blake3_verify_output_script},
     };
     use secp256k1::Secp256k1;
 
-    use super::*;
-
-    // Test Blake3 script generation
     #[test]
     fn test_blake3_script_generation() {
         let message = [0u8; 32];
@@ -549,254 +547,389 @@ mod tests {
         combined_script_bytes.extend(verify_bytes);
 
         let script = ScriptBuf::from_bytes(combined_script_bytes);
-        // let script_asm = script.to_asm_string();
-        // println!("Blake3 script ASM: \n{}", script_asm);
 
         let result = execute_script_buf(script);
 
         println!("Result: {:?}", result);
         assert!(result.success, "Blake3 script execution failed");
-    }
 
-    // --- New Tests ---
+        // Create an invalid hash by copying the expected hash and modifying one byte
+        let mut invalid_hash = expected_hash.clone();
+        invalid_hash[0] ^= 0x01; // Change one byte to create an invalid hash
 
-    #[test]
-    fn test_calculate_flow_id_valid() {
-        // Example from manual calculation or previous run
-        // H(input=114, nonce=3) |_B=8 should give a specific flow_id if L allows
-        // Let's recalculate H(114 || 3) with Blake3
-        // input = 114 = 0x72000000 (u32 le)
-        // nonce = 3   = 0x0300000000000000 (u64 le)
-        // message = 72000000 0300000000000000
-        let mut hasher = Hasher::new();
-        hasher.update(&114u32.to_le_bytes());
-        hasher.update(&3u64.to_le_bytes());
-        let hash = hasher.finalize(); // Example hash: 3a910d... (depends on exact blake3 version)
-        let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(&hash.as_bytes()[0..4]);
-        let hash_u32_le = u32::from_le_bytes(bytes); // Example: 0x.......3a
+        // Test push message script generation (requires message argument)
+        let push_bytes = blake3_push_message_script_with_limb(&message, limb_len)
+            .compile()
+            .to_bytes();
 
-        // Case 1: B=8, L=4 (Max flow_id = 15)
-        // Mask = (1 << 8) - 1 = 0xFF
-        let expected_prefix_b8 = hash_u32_le & 0xFF;
-        if expected_prefix_b8 < 16 {
-            assert_eq!(
-                calculate_flow_id(114, 3, 8, 4),
-                Ok(expected_prefix_b8),
-                "Test Case 1 Failed: B=8, L=4"
-            );
-        } else {
-            // If the actual prefix is >= 16, the function should return Err
-            assert!(
-                calculate_flow_id(114, 3, 8, 4).is_err(),
-                "Test Case 1 Failed (Expected Err): B=8, L=4"
-            );
-        }
+        // Test compute script generation
+        let optimized_compute =
+            optimizer::optimize(blake3_compute_script_with_limb(message.len(), limb_len).compile());
 
-        // Case 2: B=8, L=8 (Max flow_id = 255)
-        // The prefix should always be valid as prefix <= 0xFF
-        assert_eq!(
-            calculate_flow_id(114, 3, 8, 8),
-            Ok(expected_prefix_b8),
-            "Test Case 2 Failed: B=8, L=8"
-        );
+        // Test verify output script generation
+        let verify_bytes = blake3_verify_output_script(invalid_hash)
+            .compile()
+            .to_bytes();
 
-        // Case 3: B=4, L=4 (Max flow_id = 15)
-        // Mask = (1 << 4) - 1 = 0x0F
-        let expected_prefix_b4 = hash_u32_le & 0x0F;
-        assert_eq!(
-            calculate_flow_id(114, 3, 4, 4),
-            Ok(expected_prefix_b4),
-            "Test Case 3 Failed: B=4, L=4"
-        );
+        // Combine scripts for execution (assuming message is pushed first)
+        let mut combined_script_bytes = push_bytes;
+        combined_script_bytes.extend(optimized_compute.to_bytes());
+        combined_script_bytes.extend(verify_bytes);
+
+        let script = ScriptBuf::from_bytes(combined_script_bytes);
+
+        let result = execute_script_buf(script);
+
+        println!("Result: {:?}", result);
+        assert!(!result.success, "Blake3 script execution failed");
     }
 
     #[test]
-    fn test_calculate_flow_id_invalid_range() {
-        // Find input/nonce that hashes to a prefix outside the L range
-        // Let B=8, L=4. We need H(x,r)|_8 >= 16
-        let mut input = 1u32;
-        let mut nonce = 0u64;
-        loop {
-            let mut hasher = Hasher::new();
-            hasher.update(&input.to_le_bytes());
-            hasher.update(&nonce.to_le_bytes());
-            let hash = hasher.finalize();
-            let mut bytes = [0u8; 4];
-            bytes.copy_from_slice(&hash.as_bytes()[0..4]);
-            let hash_u32_le = u32::from_le_bytes(bytes);
-            let prefix_b8 = hash_u32_le & 0xFF;
+    fn test_prefix_flow() {
+        let secp: Secp256k1<secp256k1::All> = Secp256k1::new();
+        let (sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
+        let signer_keypair = Keypair::from_secret_key(&secp, &sk);
 
-            if prefix_b8 >= 16 {
-                // Found a hash prefix outside [0, 15]
-                assert!(calculate_flow_id(input, nonce, 8, 4).is_err());
-                break;
-            }
-            nonce = nonce.checked_add(1).unwrap();
-            if nonce > 1_000_000 {
-                // Safety break
-                input = input.checked_add(1).unwrap();
-                nonce = 0;
-                if input > 100 {
-                    panic!("Could not find invalid hash prefix easily");
-                }
-            }
-        }
-    }
+        let signer_pubkey = PublicKey::new(pk);
 
-    #[test]
-    fn test_find_valid_nonce_finds_correct_flow() {
-        let input = 114u32;
-        let b_bits = 8;
-        let l_bits = 4;
-        let max_flow_id = 1u32 << l_bits; // 16
+        // ColliderVM parameters
+        let b = 16;
+        let l = 4;
+        let input_value = 123u32;
+        let (nonce, flow_id, _hash) = find_valid_nonce(input_value, b, l).unwrap();
 
-        match find_valid_nonce(input, b_bits, l_bits) {
-            Ok((found_nonce, found_flow_id)) => {
-                println!(
-                    "Found nonce={}, flow_id={} for input={}",
-                    found_nonce, found_flow_id, input
-                );
-                // Verify that the found flow_id is indeed valid for the nonce
-                assert_eq!(
-                    calculate_flow_id(input, found_nonce, b_bits, l_bits),
-                    Ok(found_flow_id),
-                    "Nonce verification failed: calculate_flow_id mismatch"
-                );
-                // Verify that the found flow_id is within the allowed range
-                assert!(
-                    found_flow_id < max_flow_id,
-                    "Found flow_id {} is not less than max_flow_id {}",
-                    found_flow_id,
-                    max_flow_id
-                );
-            }
-            Err(e) => {
-                panic!("find_valid_nonce failed to find a nonce: {}", e);
-            }
-        }
-    }
+        let flow_id_prefix: Vec<u8> = flow_id_to_prefix_bytes(flow_id, b);
 
-    // Potential future test: test find_valid_nonce ...
+        // Create a dummy transaction signature
+        let sighash_f1 = create_dummy_sighash_message(&flow_id_prefix.clone());
+        let sig_f1 = secp.sign_schnorr(&sighash_f1, &signer_keypair);
 
-    #[test]
-    fn test_locking_script_f1_valid() {
-        let config = ColliderVmConfig {
-            n: 1,
-            m: 1,
-            l: 4,
-            b: 8,
-            k: 2,
+        let prefix_len = flow_id_prefix.len();
+        let total_msg_len = 12; // x_4b + r_4b0 + r_4b1
+        let limb_len = 4;
+
+        // 1) Script to check signature
+        let sig_check = {
+            let mut b = Builder::new();
+            b = b.push_key(&signer_pubkey);
+            b.push_opcode(opcodes::all::OP_CHECKSIGVERIFY).into_script()
         };
-        let secp = Secp256k1::new();
-        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
-        let _keypair = Keypair::from_secret_key(&secp, &privkey);
-        let signer_pubkey = PublicKey::new(pubkey);
 
-        let flow_id = 5u32;
-        let input_value = 150u32; // Should pass F1 (> 100)
-
-        // Build the locking script
-        let script = build_script_f1_locked(&signer_pubkey, flow_id, config.b);
-
-        // Construct a valid witness: <sig> <flow_id> <input_x>
-        // We use a dummy signature here, as execute_script_buf doesn't verify it.
-        let dummy_sig_bytes = [0u8; 64];
-
-        let witness_script = Builder::new()
-            .push_slice(dummy_sig_bytes)
-            .push_int(flow_id as i64)
-            .push_int(input_value as i64)
+        // 2) Bring x_num to top, check x_num > 100
+        let x_greater_check = Builder::new()
+            .push_opcode(opcodes::all::OP_DUP)
+            .push_int(F1_THRESHOLD as i64)
+            .push_opcode(opcodes::all::OP_GREATERTHAN)
+            .push_opcode(opcodes::all::OP_VERIFY)
             .into_script();
 
-        // Combine witness and locking script
-        let mut full_script_bytes = witness_script.to_bytes();
-        full_script_bytes.extend(script.to_bytes());
-        let full_script = ScriptBuf::from_bytes(full_script_bytes);
+        // 3) Drop x_num and reorder for BLAKE3
+        let reorder_for_blake = Builder::new()
+            .push_opcode(opcodes::all::OP_DROP)
+            .into_script();
 
-        let result = execute_script_buf(full_script);
-        println!("F1 Valid Test Result: {:?}", result);
-        assert!(
-            result.success,
-            "F1 script should succeed with valid witness"
-        );
+        // 4) BLAKE3 compute snippet - OPTIMIZED
+        // Construct the message to be hashed, similar to the calculate_flow_id function
+        // input is 4 bytes, nonce is 8 bytes
+        let message = [
+            input_value.to_le_bytes(),
+            nonce.to_le_bytes()[0..4].try_into().unwrap(),
+            nonce.to_le_bytes()[4..8].try_into().unwrap(),
+        ]
+        .concat();
+        println!("message: {}", hex::encode(message.clone()));
+        let push_compiled = blake3_push_message_script_with_limb(&message, limb_len).compile();
+        let push_script = ScriptBuf::from_bytes(push_compiled.to_bytes());
+
+        let compute_compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
+        let compute_optimized = optimizer::optimize(compute_compiled);
+        let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
+
+        // 5) drop limbs we don't need for prefix check
+        // Needed nibbles: prefix_len (because now represented as nibbles) or B / 4
+        let needed_nibbles = prefix_len;
+        println!("needed_nibbles: {}", needed_nibbles);
+        let blake3_script_hash_len_nibbles = 64;
+        let to_drop = blake3_script_hash_len_nibbles - needed_nibbles;
+        println!("to_drop: {}", to_drop);
+        let drop_script = {
+            let mut b = Builder::new();
+            for _ in 0..to_drop {
+                b = b.push_opcode(opcodes::all::OP_DROP);
+            }
+            b.into_script()
+        };
+
+        // 6) compare prefix => OP_EQUALVERIFY
+        let prefix_script = build_prefix_equalverify(&flow_id_prefix);
+
+        println!("prefix_script: {}", prefix_script);
+
+        // 7) push OP_TRUE
+        let success_script = Builder::new().push_opcode(OP_TRUE).into_script();
+
+        // Combine the locking script parts
+        let f1_locking_script = combine_scripts(&[
+            sig_check,
+            x_greater_check,
+            reorder_for_blake,
+            push_script,
+            compute_script,
+            drop_script,
+            prefix_script,
+            success_script,
+        ]);
+
+        // Construct the witness
+
+        // 2) Let's run the scripts with the actual witness.
+        // Our script expects: [ signature, x_num, r_4b1, r_4b0, x_4b ]
+        //   x_4b is the raw 4-bytes of input_value
+        //   r_4b0, r_4b1 => the 8 bytes of the nonce in 4-byte lumps
+        let x_le_4 = input_value.to_le_bytes();
+        let r_le_8 = nonce.to_le_bytes();
+        let r_4b0 = &r_le_8[0..4];
+        let r_4b1 = &r_le_8[4..8];
+
+        // Print debugging info about the data
+        println!("r_4b0 = {}", hex::encode(r_4b0));
+        println!("r_4b1 = {}", hex::encode(r_4b1));
+        println!("x_le_4 = {}", hex::encode(x_le_4));
+
+        // Create PushBytesBuf for all raw bytes for F1
+        let sig_f1_buf =
+            PushBytesBuf::try_from(sig_f1.as_ref().to_vec()).expect("sig_f1 conversion failed");
+        let _r_4b1_buf_f1 =
+            PushBytesBuf::try_from(r_4b1.to_vec()).expect("r_4b1 conversion failed");
+        let _r_4b0_buf_f1 =
+            PushBytesBuf::try_from(r_4b0.to_vec()).expect("r_4b0 conversion failed");
+        let _x_le_4_buf_f1 =
+            PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed");
+
+        // -- Step F1 script
+        let witness_f1 = {
+            let mut b = Builder::new();
+            b = b.push_int(input_value as i64);
+            b = b.push_slice(sig_f1_buf);
+            b.into_script()
+        };
+
+        let mut full_f1 = witness_f1.to_bytes();
+        full_f1.extend(f1_locking_script.to_bytes());
+        let exec_f1_script = ScriptBuf::from_bytes(full_f1);
+
+        let f1_res = execute_script_buf(exec_f1_script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+        //assert!(f1_res.success);
     }
 
     #[test]
-    fn test_locking_script_f1_invalid_logic() {
-        let config = ColliderVmConfig {
-            n: 1,
-            m: 1,
-            l: 4,
-            b: 8,
-            k: 2,
+    fn test_encoding() {
+        let witness_f1 = {
+            let mut b = Builder::new();
+            b = b.push_int(0x00 as i64);
+            b = b.push_int(0x0d as i64);
+            b = b.push_int(0x00 as i64);
+            b = b.push_int(0x00 as i64);
+            b.into_script()
         };
-        let secp = Secp256k1::new();
-        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
-        let _keypair = Keypair::from_secret_key(&secp, &privkey);
-        let signer_pubkey = PublicKey::new(pubkey);
+        println!("witness_f1: {}", witness_f1);
 
-        let flow_id = 5u32;
-        let input_value = 50u32; // Should fail F1 (<= 100)
+        // flow id prefix: 000d0000
+        let flow_id_prefix = vec![0x00, 0x0d, 0x00, 0x00];
+        let script_part_1 = build_prefix_equalverify(&flow_id_prefix);
 
-        let script = build_script_f1_locked(&signer_pubkey, flow_id, config.b);
-        let dummy_sig_bytes = [0u8; 64];
-        let witness_script = Builder::new()
-            .push_slice(dummy_sig_bytes)
-            .push_int(flow_id as i64)
-            .push_int(input_value as i64)
-            .into_script();
+        let locking_script = combine_scripts(&[script_part_1, script! {OP_TRUE}.compile()]);
 
-        let mut full_script_bytes = witness_script.to_bytes();
-        full_script_bytes.extend(script.to_bytes());
-        let full_script = ScriptBuf::from_bytes(full_script_bytes);
+        let mut full_f1 = witness_f1.to_bytes();
+        full_f1.extend(locking_script.to_bytes());
+        let exec_f1_script = ScriptBuf::from_bytes(full_f1);
+        println!("exec_f1_script: {}", exec_f1_script);
 
-        let result = execute_script_buf(full_script);
-        println!("F1 Invalid Logic Test Result: {:?}", result);
-        assert!(
-            !result.success,
-            "F1 script should fail with invalid input logic"
-        );
+        let f1_res = execute_script_buf(exec_f1_script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+        assert!(f1_res.success);
     }
 
     #[test]
-    fn test_locking_script_f1_invalid_flow_id() {
-        let config = ColliderVmConfig {
-            n: 1,
-            m: 1,
-            l: 4,
-            b: 8,
-            k: 2,
+    fn test_blake3_input_from_witness() {
+        let message = [
+            0x7b, 0x00, 0x00, 0x00, 0xd9, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
+
+        let total_msg_len = 12;
+        let limb_len = 4;
+        let compute_compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
+        let compute_optimized = optimizer::optimize(compute_compiled);
+        let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
+
+        let locking_script = combine_scripts(&[compute_script]);
+
+        let witness = push_compiled;
+
+        let mut full_f1 = witness.to_bytes();
+        full_f1.extend(locking_script.to_bytes());
+        let exec_f1_script = ScriptBuf::from_bytes(full_f1);
+        let f1_res = execute_script_buf(exec_f1_script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+        //assert!(f1_res.success);
+    }
+
+    #[test]
+    fn test_prefix_flow_input_from_witness() {
+        let secp: Secp256k1<secp256k1::All> = Secp256k1::new();
+        let (sk, pk) = secp.generate_keypair(&mut rand::thread_rng());
+        let signer_keypair = Keypair::from_secret_key(&secp, &sk);
+
+        let signer_pubkey = PublicKey::new(pk);
+
+        // ColliderVM parameters
+        let b = 16;
+        let l = 4;
+        let input_value = 123u32;
+        let (nonce, flow_id, _hash) = find_valid_nonce(input_value, b, l).unwrap();
+
+        let flow_id_prefix: Vec<u8> = flow_id_to_prefix_bytes(flow_id, b);
+
+        // Create a dummy transaction signature
+        let sighash_f1 = create_dummy_sighash_message(&flow_id_prefix.clone());
+        let sig_f1 = secp.sign_schnorr(&sighash_f1, &signer_keypair);
+
+        let prefix_len = flow_id_prefix.len();
+        let total_msg_len = 12; // x_4b + r_4b0 + r_4b1
+        let limb_len = 4;
+
+        // 1) Script to check signature
+        let sig_check = {
+            let mut b = Builder::new();
+            b = b.push_key(&signer_pubkey);
+            b.push_opcode(opcodes::all::OP_CHECKSIGVERIFY).into_script()
         };
-        let secp = Secp256k1::new();
-        let (privkey, pubkey) = secp.generate_keypair(&mut rand::thread_rng());
-        let _keypair = Keypair::from_secret_key(&secp, &privkey);
-        let signer_pubkey = PublicKey::new(pubkey);
 
-        let correct_flow_id = 5u32;
-        let incorrect_flow_id = 6u32;
-        let input_value = 150u32; // Passes F1 logic
-
-        // Script expects correct_flow_id
-        let script = build_script_f1_locked(&signer_pubkey, correct_flow_id, config.b);
-
-        // Witness provides incorrect_flow_id
-        let dummy_sig_bytes = [0u8; 64];
-        let witness_script = Builder::new()
-            .push_slice(dummy_sig_bytes)
-            .push_int(incorrect_flow_id as i64) // Use incorrect flow ID here
-            .push_int(input_value as i64)
+        // 2) Bring x_num to top, check x_num > 100
+        let x_greater_check = Builder::new()
+            .push_opcode(opcodes::all::OP_DUP)
+            .push_int(F1_THRESHOLD as i64)
+            .push_opcode(opcodes::all::OP_GREATERTHAN)
+            .push_opcode(opcodes::all::OP_VERIFY)
             .into_script();
 
-        let mut full_script_bytes = witness_script.to_bytes();
-        full_script_bytes.extend(script.to_bytes());
-        let full_script = ScriptBuf::from_bytes(full_script_bytes);
+        // 3) Drop x_num and reorder for BLAKE3
+        let reorder_for_blake = Builder::new()
+            .push_opcode(opcodes::all::OP_DROP)
+            .into_script();
 
-        let result = execute_script_buf(full_script);
-        println!("F1 Invalid Flow ID Test Result: {:?}", result);
-        assert!(
-            !result.success,
-            "F1 script should fail with incorrect flow ID in witness"
-        );
+        // 4) BLAKE3 compute snippet - OPTIMIZED
+        // Construct the message to be hashed, similar to the calculate_flow_id function
+        // input is 4 bytes, nonce is 8 bytes
+
+        let compute_compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
+        let compute_optimized = optimizer::optimize(compute_compiled);
+        let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
+
+        // 5) drop limbs we don't need for prefix check
+        // Needed nibbles: prefix_len (because now represented as nibbles) or B / 4
+        let needed_nibbles = prefix_len;
+        println!("needed_nibbles: {}", needed_nibbles);
+        let blake3_script_hash_len_nibbles = 64;
+        let to_drop = blake3_script_hash_len_nibbles - needed_nibbles;
+        println!("to_drop: {}", to_drop);
+        let drop_script = {
+            let mut b = Builder::new();
+            for _ in 0..to_drop {
+                b = b.push_opcode(opcodes::all::OP_DROP);
+            }
+            b.into_script()
+        };
+
+        // 6) compare prefix => OP_EQUALVERIFY
+        let prefix_script = build_prefix_equalverify(&flow_id_prefix);
+
+        println!("prefix_script: {}", prefix_script);
+
+        // 7) push OP_TRUE
+        let success_script = Builder::new().push_opcode(OP_TRUE).into_script();
+
+        // Combine the locking script parts
+        let f1_locking_script = combine_scripts(&[
+            sig_check,
+            x_greater_check,
+            reorder_for_blake,
+            compute_script,
+            drop_script,
+            prefix_script,
+            success_script,
+        ]);
+
+        // Construct the witness
+
+        // 2) Let's run the scripts with the actual witness.
+        // Our script expects: [ signature, x_num, r_4b1, r_4b0, x_4b ]
+        //   x_4b is the raw 4-bytes of input_value
+        //   r_4b0, r_4b1 => the 8 bytes of the nonce in 4-byte lumps
+        let x_le_4 = input_value.to_le_bytes();
+        let r_le_8 = nonce.to_le_bytes();
+        let r_4b0 = &r_le_8[0..4];
+        let r_4b1 = &r_le_8[4..8];
+
+        // Print debugging info about the data
+        println!("r_4b0 = {}", hex::encode(r_4b0));
+        println!("r_4b1 = {}", hex::encode(r_4b1));
+        println!("x_le_4 = {}", hex::encode(x_le_4));
+
+        // Create PushBytesBuf for all raw bytes for F1
+        let sig_f1_buf =
+            PushBytesBuf::try_from(sig_f1.as_ref().to_vec()).expect("sig_f1 conversion failed");
+        let _r_4b1_buf_f1 =
+            PushBytesBuf::try_from(r_4b1.to_vec()).expect("r_4b1 conversion failed");
+        let _r_4b0_buf_f1 =
+            PushBytesBuf::try_from(r_4b0.to_vec()).expect("r_4b0 conversion failed");
+        let _x_le_4_buf_f1 =
+            PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed");
+
+        let message = [
+            0x7b, 0x00, 0x00, 0x00, 0xd9, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
+
+        // -- Step F1 script
+        let witness_f1 = {
+            let mut b = Builder::new();
+            b = b.push_int(input_value as i64);
+            b = b.push_slice(sig_f1_buf);
+            b.into_script()
+        };
+
+        let mut full_f1 = push_compiled.to_bytes();
+        full_f1.extend(witness_f1.to_bytes());
+        full_f1.extend(f1_locking_script.to_bytes());
+        let exec_f1_script = ScriptBuf::from_bytes(full_f1);
+
+        let f1_res = execute_script_buf(exec_f1_script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+        //assert!(f1_res.success);
+    }
+    pub fn create_dummy_sighash_message(seed_bytes: &[u8]) -> Message {
+        let mut engine = sha256::HashEngine::default();
+        engine.input(seed_bytes);
+        let digest = sha256::Hash::from_engine(engine);
+        Message::from_digest(digest.to_byte_array())
     }
 }
