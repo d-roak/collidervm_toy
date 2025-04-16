@@ -2,7 +2,7 @@
 
 This project provides a simplified Rust simulation of the concepts presented in the [ColliderVM: Stateful Computation on Bitcoin](https://eprint.iacr.org/2025/591) paper. It demonstrates the core mechanisms of ColliderVM, particularly the use of presigned transaction flows and hash collision challenges for enabling stateful computation on Bitcoin without relying on fraud proofs.
 
-**Disclaimer:** This is a _toy_ simulation and does **not** implement a production-ready ColliderVM protocol. It simplifies many aspects (like signature verification, sighashing, and transaction structure) for clarity and focuses on the protocol's structural flow and the hash collision mechanism.
+**Disclaimer:** This is a _toy_ simulation and does **not** implement a production-ready ColliderVM protocol. It simplifies some aspects for clarity and focuses on the protocol's structural flow and the hash collision mechanism.
 
 ## Background: ColliderVM Core Concepts
 
@@ -30,7 +30,7 @@ This simulation implements a minimal proof-of-concept:
 - **Simulated Actors:** Generates `n` Signers and `m` Operators with `secp256k1` key pairs (`SignerInfo`, `OperatorInfo`), but their roles in complex multi-party signing or liveness are simplified.
 - **Simulated Presigning:** Creates placeholder Bitcoin `Transaction` structures (`create_placeholder_tx`) and calculates simplified sighash messages (`create_toy_sighash_message`). It collects real Schnorr signatures but doesn't handle actual UTXO management or realistic fee calculation.
 - **Simplified Bitcoin Script:**
-  - **Hash Check:** The script check `H(x, r)|_B = d` is _simulated_ by directly pushing the expected `flow_id` (`d`) onto the stack and using `OP_EQUALVERIFY` against the `flow_id` provided in the witness. It does _not_ implement the hash function `H` or bit extraction within Bitcoin Script.
+  - **Hash Check:** The script check `H(x, r)|_B = d` is executed according to the rules of the paper for the prefix check. However, for now, the concatenation of `x` and `r` for the input of the `Blake3` hash is passed separately from the input `x` used for the logic of the functions `F1` and `F2`, which would allow the operator to cheat. We need to improve this part to have the same input `x` used for both the hash and the logic of the functions.
   - **Signature Check:** Scripts include `OP_CHECKSIGVERIFY` and the Signer's public key. However, the `bitvm::execute_script_buf` function used for simulation does _not_ perform cryptographic signature verification. It checks script logic but assumes signatures are valid if provided.
 - **Limited Flows:** Generates `min(2^L, 16)` flows instead of the full `2^L` for performance reasons in this demo.
 - **Off-Chain Hashing:** The Operator's nonce search (`find_valid_nonce`) uses Rust's `blake3` library to simulate the `~2^(B-L)` off-chain work.
@@ -198,11 +198,10 @@ Options:
 To create a more complete implementation, potential improvements include:
 
 - Generate actual, signable Bitcoin transaction templates using `bitcoin` library features.
-- Produce real secp256k1 signatures for the presigned flows.
 - Integrate with Bitcoin libraries for transaction construction and potentially broadcasting.
 - Handle UTXO management and transaction chaining realistically.
 - Implement efficient storage for the potentially large number of flows (`2^L`).
-- Implement the actual hash function `H` and bit extraction `|_B` within Bitcoin script.
+- Improve the hash collision mechanism to ensure the same input `x` is used for both the hash and the logic of the functions.
 - Implement the double/triple collision resistant variants from the paper (Section 2.2).
 
 ## References
