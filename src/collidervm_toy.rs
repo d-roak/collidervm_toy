@@ -511,7 +511,7 @@ mod tests {
         // Combine the locking script parts
         let f1_locking_script = combine_scripts(&[
             sig_check,
-            //x_greater_check,
+            x_greater_check,
             //reorder_for_blake,
             //push_script,
             //compute_script,
