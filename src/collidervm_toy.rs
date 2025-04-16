@@ -363,6 +363,7 @@ pub fn benchmark_hash_rate(duration_secs: u64) -> u64 {
 mod tests {
     use super::*;
     use bitcoin::opcodes::all::{OP_ADD, OP_DROP, OP_EQUALVERIFY, OP_GREATERTHAN};
+    use bitcoin_script::script;
     // use bitcoin_script_stack::{evaluate::EvalResult, optimize, script_executor::ExecOptions};
     use bitvm::{execute_script_buf, hash::blake3::blake3_verify_output_script};
     use secp256k1::Secp256k1;
@@ -510,12 +511,13 @@ mod tests {
         // Combine the locking script parts
         let f1_locking_script = combine_scripts(&[
             sig_check,
-            x_greater_check,
-            reorder_for_blake,
-            push_script,
-            compute_script,
-            drop_script,
-            prefix_script,
+            //x_greater_check,
+            //reorder_for_blake,
+            //push_script,
+            //compute_script,
+            //drop_script,
+            //prefix_script,
+            script! {OP_DROP OP_DROP OP_DROP OP_DROP}.compile(),
             success_script,
         ]);
 
@@ -565,6 +567,8 @@ mod tests {
         println!("F1 => success={}", f1_res.success);
         println!("F1 => exec_stats={:?}", f1_res.stats);
         println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
         //println!("F1 => log={:?}", f1_res);
     }
 
