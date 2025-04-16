@@ -505,6 +505,7 @@ mod tests {
         let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
 
         // 5) drop limbs we don't need for prefix check
+        // Needed nibbles: 2 * prefix_len or B / 4
         let needed_nibbles = prefix_len * 2;
         println!("needed_nibbles: {}", needed_nibbles);
         let blake3_script_hash_len_nibbles = 64;
@@ -521,6 +522,8 @@ mod tests {
         // 6) compare prefix => OP_EQUALVERIFY
         let prefix_script = build_prefix_equalverify(&flow_id_prefix);
 
+        println!("prefix_script: {}", prefix_script);
+
         // 7) push OP_TRUE
         let success_script = Builder::new().push_opcode(OP_TRUE).into_script();
 
@@ -532,7 +535,7 @@ mod tests {
             push_script,
             compute_script,
             drop_script,
-            //prefix_script,
+            prefix_script,
             //script! {OP_DROP OP_DROP OP_DROP OP_DROP}.compile(),
             //success_script,
         ]);
