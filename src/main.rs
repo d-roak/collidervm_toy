@@ -72,7 +72,7 @@ impl Preset {
                 n: 3,
                 m: 2,
                 l: 4,
-                b: 8, // must be multiple of 8, <= 32
+                b: 16, // must be multiple of 8, <= 32
                 k: 2,
             },
             Preset::Medium => {

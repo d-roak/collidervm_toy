@@ -255,11 +255,11 @@ pub fn online_execution(
     // -- Step F1 script
     let witness_f1 = {
         let mut b = Builder::new();
-        b = b.push_slice(sig_f1_buf); // Signature
-        b = b.push_slice(r_4b1_buf_f1); // Nonce part 1
-        b = b.push_slice(r_4b0_buf_f1); // Nonce part 0
-        b = b.push_slice(x_le_4_buf_f1); // x as 4 bytes (for hashing)
+        //b = b.push_slice(r_4b1_buf_f1); // Nonce part 1
+        //b = b.push_slice(r_4b0_buf_f1); // Nonce part 0
+        //b = b.push_slice(x_le_4_buf_f1); // x as 4 bytes (for hashing)
         b = b.push_int(input_value as i64); // x as number (minimal, for comparison)
+        b = b.push_slice(sig_f1_buf); // Signature
         b.into_script()
     };
 
@@ -267,14 +267,14 @@ pub fn online_execution(
     println!("Debug - F1 witness: {}", witness_f1);
 
     // Debug the locking script
-    println!("Debug - F1 locking: {}", step_f1.locking_script);
+    //println!("Debug - F1 locking: {}", step_f1.locking_script);
 
     let mut full_f1 = witness_f1.to_bytes();
     full_f1.extend(step_f1.locking_script.to_bytes());
     let exec_f1_script = ScriptBuf::from_bytes(full_f1);
 
     // Debug the full script
-    println!("Debug - F1 full script: {}", exec_f1_script);
+    //println!("Debug - F1 full script: {}", exec_f1_script);
 
     let f1_res = execute_script_buf(exec_f1_script);
     println!("F1 => success={}  log={:?}", f1_res.success, f1_res);
@@ -292,11 +292,11 @@ pub fn online_execution(
     // -- Step F2 script
     let witness_f2 = {
         let mut b = Builder::new();
-        b = b.push_slice(sig_f2_buf); // Signature
-        b = b.push_slice(r_4b1_buf_f2); // Nonce part 1
-        b = b.push_slice(r_4b0_buf_f2); // Nonce part 0
-        b = b.push_slice(x_le_4_buf_f2); // x as 4 bytes (for hashing)
+        //b = b.push_slice(r_4b1_buf_f2); // Nonce part 1
+        //b = b.push_slice(r_4b0_buf_f2); // Nonce part 0
+        //b = b.push_slice(x_le_4_buf_f2); // x as 4 bytes (for hashing)
         b = b.push_int(input_value as i64); // x as number (minimal, for comparison)
+        b = b.push_slice(sig_f2_buf); // Signature
         b.into_script()
     };
     let mut full_f2 = witness_f2.to_bytes();
