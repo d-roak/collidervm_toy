@@ -245,6 +245,9 @@ pub fn online_execution(
     println!("Debug: r_4b1 = {:?}", r_4b1);
     println!("Debug: x_le_4 = {:?}", x_le_4);
 
+    let prefix_bytes: Vec<u8> = flow_id_to_prefix_bytes(flow_id, config.b);
+    println!("Flow ID prefix = {:?}", hex::encode(prefix_bytes));
+
     // Create PushBytesBuf for all raw bytes for F1
     let sig_f1_buf =
         PushBytesBuf::try_from(sig_f1.as_ref().to_vec()).expect("sig_f1 conversion failed");
