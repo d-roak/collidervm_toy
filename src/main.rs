@@ -187,21 +187,85 @@ fn main() {
     println!("  k = {}", config.k);
     println!("  measured hash_rate = {} H/s", hash_rate);
 
+    println!(
+        "\n{}",
+        "-----------------------------------------------------"
+            .bold()
+            .yellow()
+    );
+    println!(
+        "{}: {} -> L={}, B={}, k={}",
+        "Running Simulation with".bold().blue(),
+        format!("{:?}", cli.preset).cyan(),
+        config.l,
+        config.b,
+        config.k
+    );
+    println!(
+        "{}: {}",
+        "Input Value (x)".bold().blue(),
+        input_value.to_string().cyan()
+    );
+    println!(
+        "{}",
+        "-----------------------------------------------------"
+            .bold()
+            .yellow()
+    );
+
     let total_hashes = 1u64 << (config.b.saturating_sub(config.l));
     let est_sec = total_hashes as f64 / hash_rate as f64;
-    println!("  Estimated 2^(B-L) = {}", total_hashes);
-    println!("  => ~{:.2} seconds at ~{} H/s", est_sec, hash_rate);
+    println!(
+        "  {} 2^(B-L) = {} (~{:.2} seconds at {} H/s)",
+        "Expected Hashes:".dimmed(),
+        total_hashes.to_string().cyan(),
+        est_sec,
+        hash_rate
+    );
 
     match simulation::run_simulation(config, input_value) {
         Ok(result) => {
-            println!("\n--- Final Result ---");
-            println!("Success?  {}", result.success);
-            println!("F1 passed? {}", result.f1_result);
-            println!("F2 passed? {}", result.f2_result);
-            println!("Message:   {}", result.message);
+            println!(
+                "\n{}",
+                "--- Simulation Complete: Final Result ---".bold().green()
+            );
+            println!(
+                "  {:<15} {}",
+                "Overall Success:".bold(),
+                if result.success {
+                    "PASSED ✅".bold().green()
+                } else {
+                    "FAILED ❌".bold().red()
+                }
+            );
+            println!(
+                "  {:<15} {}",
+                "F1 Check:".dimmed(),
+                if result.f1_result {
+                    "Passed".green()
+                } else {
+                    "Failed".red()
+                }
+            );
+            println!(
+                "  {:<15} {}",
+                "F2 Check:".dimmed(),
+                if result.f2_result {
+                    "Passed".green()
+                } else {
+                    "Failed".red()
+                }
+            );
+            println!("  {:<15} {}", "Outcome:".dimmed(), result.message.italic());
+            println!(
+                "{}",
+                "-----------------------------------------".bold().green()
+            );
         }
         Err(e) => {
-            eprintln!("Error: {}", e);
+            println!("\n{}", "--- Simulation Failed ---".bold().red());
+            eprintln!("{}: {}", "Error".red(), e);
+            println!("{}", "--------------------------".bold().red());
             std::process::exit(1);
         }
     }
