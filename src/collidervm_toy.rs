@@ -517,8 +517,8 @@ mod tests {
             //compute_script,
             //drop_script,
             //prefix_script,
-            script! {OP_DROP OP_DROP OP_DROP OP_DROP}.compile(),
-            success_script,
+            //script! {OP_DROP OP_DROP OP_DROP OP_DROP}.compile(),
+            //success_script,
         ]);
 
         // Construct the witness
@@ -533,9 +533,9 @@ mod tests {
         let r_4b1 = &r_le_8[4..8];
 
         // Print debugging info about the data
-        println!("Debug: r_4b0 = {:?}", r_4b0);
-        println!("Debug: r_4b1 = {:?}", r_4b1);
-        println!("Debug: x_le_4 = {:?}", x_le_4);
+        println!("r_4b0 = {:?}", r_4b0);
+        println!("r_4b1 = {:?}", r_4b1);
+        println!("x_le_4 = {:?}", x_le_4);
 
         // Create PushBytesBuf for all raw bytes for F1
         let sig_f1_buf =
@@ -557,7 +557,7 @@ mod tests {
         };
 
         // Debug the witness script
-        println!("Debug - F1 witness: {}", witness_f1);
+        println!("F1 witness: {}", witness_f1);
 
         let mut full_f1 = witness_f1.to_bytes();
         full_f1.extend(f1_locking_script.to_bytes());
@@ -570,6 +570,52 @@ mod tests {
         println!("F1 => error={:?}", f1_res.error);
         println!("F1 => last_opcode={:?}", f1_res.last_opcode);
         //println!("F1 => log={:?}", f1_res);
+    }
+
+    #[test]
+    fn test_encoding() {
+        let x_greater_check = Builder::new()
+            .push_opcode(opcodes::all::OP_DUP)
+            .push_int(F1_THRESHOLD as i64)
+            .push_opcode(opcodes::all::OP_GREATERTHAN)
+            .push_opcode(opcodes::all::OP_VERIFY)
+            .into_script();
+        let input_value = 123u32;
+        let nonce = 13142470u64;
+        let x_le_4 = input_value.to_le_bytes();
+        let r_le_8 = nonce.to_le_bytes();
+        let r_4b0 = &r_le_8[0..4];
+        let r_4b1 = &r_le_8[4..8];
+        let r_4b1_buf_f1 = PushBytesBuf::try_from(r_4b1.to_vec()).expect("r_4b1 conversion failed");
+        let r_4b0_buf_f1 = PushBytesBuf::try_from(r_4b0.to_vec()).expect("r_4b0 conversion failed");
+        let x_le_4_buf_f1 =
+            PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed");
+        let witness_f1 = {
+            let mut b = Builder::new();
+            b = b.push_slice(r_4b1_buf_f1); // Nonce part 1
+            b = b.push_slice(r_4b0_buf_f1); // Nonce part 0
+            b = b.push_slice(x_le_4_buf_f1); // x as 4 bytes (for hashing)
+            b = b.push_int(input_value as i64); // x as number (minimal, for comparison)
+            b.into_script()
+        };
+        println!("witness_f1: {}", witness_f1);
+
+        let f1_locking_script = combine_scripts(&[
+            x_greater_check,
+            script! {OP_DROP OP_DROP OP_DROP OP_DROP}.compile(),
+            script! {OP_TRUE}.compile(),
+        ]);
+
+        let mut full_f1 = witness_f1.to_bytes();
+        full_f1.extend(f1_locking_script.to_bytes());
+        let exec_f1_script = ScriptBuf::from_bytes(full_f1);
+
+        let f1_res = execute_script_buf(exec_f1_script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
     }
 
     pub fn create_dummy_sighash_message(seed_bytes: &[u8]) -> Message {
