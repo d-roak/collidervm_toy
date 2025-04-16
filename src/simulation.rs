@@ -255,9 +255,14 @@ pub fn online_execution(
     let r_4b0_buf_f1 = PushBytesBuf::try_from(r_4b0.to_vec()).expect("r_4b0 conversion failed");
     let x_le_4_buf_f1 = PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed");
 
+    // Now let's construct the message dynamically
+    // Message is input_value, nonce[0..4], nonce[4..8]
     let message = [
-        0x7b, 0x00, 0x00, 0x00, 0xd9, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
+        input_value.to_le_bytes(),
+        nonce.to_le_bytes()[0..4].try_into().unwrap(),
+        nonce.to_le_bytes()[4..8].try_into().unwrap(),
+    ]
+    .concat();
     let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
 
     // -- Step F1 script
@@ -291,8 +296,11 @@ pub fn online_execution(
 
     // -- Step F2 script
     let message = [
-        0x7b, 0x00, 0x00, 0x00, 0xd9, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
+        input_value.to_le_bytes(),
+        nonce.to_le_bytes()[0..4].try_into().unwrap(),
+        nonce.to_le_bytes()[4..8].try_into().unwrap(),
+    ]
+    .concat();
     let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
 
     // -- Step F1 script
