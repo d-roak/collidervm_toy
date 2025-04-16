@@ -505,8 +505,11 @@ mod tests {
         let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
 
         // 5) drop limbs we don't need for prefix check
-        let needed_limbs = (prefix_len + 3) / 4; // how many 4-byte limbs for prefix
-        let to_drop = 8usize.saturating_sub(needed_limbs);
+        let needed_nibbles = prefix_len * 2;
+        println!("needed_nibbles: {}", needed_nibbles);
+        let blake3_script_hash_len_nibbles = 64;
+        let to_drop = blake3_script_hash_len_nibbles - needed_nibbles;
+        println!("to_drop: {}", to_drop);
         let drop_script = {
             let mut b = Builder::new();
             for _ in 0..to_drop {
@@ -528,10 +531,10 @@ mod tests {
             reorder_for_blake,
             push_script,
             compute_script,
-            //drop_script,
+            drop_script,
             //prefix_script,
             //script! {OP_DROP OP_DROP OP_DROP OP_DROP}.compile(),
-            success_script,
+            //success_script,
         ]);
 
         // Construct the witness
