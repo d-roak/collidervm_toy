@@ -1,12 +1,11 @@
 use bitcoin::{
     Amount, PublicKey, Transaction, XOnlyPublicKey,
     blockdata::script::{Builder, ScriptBuf},
-    opcodes::{self, OP_TRUE, all},
-    script::PushBytesBuf,
+    opcodes::{self, OP_TRUE},
 };
 use bitcoin_hashes::{HashEngine, sha256};
 use bitcoin_script_stack::optimizer;
-use bitvm::hash::blake3::{blake3_compute_script_with_limb, blake3_push_message_script_with_limb};
+use bitvm::hash::blake3::blake3_compute_script_with_limb;
 use blake3::Hasher;
 use indicatif::{ProgressBar, ProgressStyle};
 use secp256k1::{Keypair, Message, SecretKey, schnorr::Signature};
@@ -234,21 +233,6 @@ pub fn build_script_f1_blake3_locked(
 
     // 4) BLAKE3 compute snippet - OPTIMIZED
     // TODO: Reconstruct the message from the witness elements.
-
-    /*let message = [
-        input_value.to_le_bytes(),
-        nonce.to_le_bytes()[0..4].try_into().unwrap(),
-        nonce.to_le_bytes()[4..8].try_into().unwrap(),
-    ]
-    .concat();*/
-    //let message = [0u8; 32];
-    /*let message = [
-        0x7b, 0x00, 0x00, 0x00, 0xd9, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];*/
-
-    //let push_compiled = blake3_push_message_script_with_limb(&message, limb_len).compile();
-    //let push_script = ScriptBuf::from_bytes(push_compiled.to_bytes());
-
     let compute_compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
     let compute_optimized = optimizer::optimize(compute_compiled);
     let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
@@ -267,14 +251,13 @@ pub fn build_script_f1_blake3_locked(
     };
 
     // 6) compare prefix => OP_EQUALVERIFY
-    println!("flow_id_prefix: {}", hex::encode(flow_id_prefix));
     let prefix_script = build_prefix_equalverify(flow_id_prefix);
 
     // 7) push OP_TRUE
     let success_script = Builder::new().push_opcode(OP_TRUE).into_script();
 
     // Combine the locking script parts
-    let f1_locking_script = combine_scripts(&[
+    combine_scripts(&[
         sig_check,
         x_greater_check,
         reorder_for_blake,
@@ -282,9 +265,7 @@ pub fn build_script_f1_blake3_locked(
         drop_script,
         prefix_script,
         success_script,
-    ]);
-
-    f1_locking_script
+    ])
 }
 
 /// Build an F2 script with onchain BLAKE3, checking x<F2_THRESHOLD and prefix
@@ -387,10 +368,12 @@ pub fn benchmark_hash_rate(duration_secs: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::opcodes::all::{OP_ADD, OP_DROP, OP_EQUALVERIFY, OP_GREATERTHAN};
+    use bitcoin::script::PushBytesBuf;
     use bitcoin_script::script;
-    // use bitcoin_script_stack::{evaluate::EvalResult, optimize, script_executor::ExecOptions};
-    use bitvm::{execute_script_buf, hash::blake3::blake3_verify_output_script};
+    use bitvm::{
+        execute_script_buf,
+        hash::blake3::{blake3_push_message_script_with_limb, blake3_verify_output_script},
+    };
     use secp256k1::Secp256k1;
 
     #[test]
@@ -556,8 +539,8 @@ mod tests {
             push_script,
             compute_script,
             drop_script,
-            //prefix_script,
-            //success_script,
+            prefix_script,
+            success_script,
         ]);
 
         // Construct the witness

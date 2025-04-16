@@ -212,12 +212,12 @@ pub fn online_execution(
     let sig_f1 = step_f1
         .signatures
         .get(&signer0.pubkey.to_bytes())
-        .ok_or_else(|| "Signer0 sig missing for F1")?;
+        .ok_or("Signer0 sig missing for F1")?;
     let step_f2 = &flow.steps[1];
     let sig_f2 = step_f2
         .signatures
         .get(&signer0.pubkey.to_bytes())
-        .ok_or_else(|| "Signer0 sig missing for F2")?;
+        .ok_or("Signer0 sig missing for F2")?;
 
     let sig_ok_f1 = secp_verify
         .verify_schnorr(sig_f1, &step_f1.sighash_message, &signer0.xonly)
@@ -231,29 +231,9 @@ pub fn online_execution(
         sig_ok_f1, sig_ok_f2
     );
 
-    // 2) Let's run the scripts with the actual witness.
-    // Our script expects: [ signature, x_num, r_4b1, r_4b0, x_4b ]
-    //   x_4b is the raw 4-bytes of input_value
-    //   r_4b0, r_4b1 => the 8 bytes of the nonce in 4-byte lumps
-    let x_le_4 = input_value.to_le_bytes();
-    let r_le_8 = nonce.to_le_bytes();
-    let r_4b0 = &r_le_8[0..4];
-    let r_4b1 = &r_le_8[4..8];
-
-    // Print debugging info about the data
-    println!("Debug: r_4b0 = {:?}", r_4b0);
-    println!("Debug: r_4b1 = {:?}", r_4b1);
-    println!("Debug: x_le_4 = {:?}", x_le_4);
-
-    let prefix_bytes: Vec<u8> = flow_id_to_prefix_bytes(flow_id, config.b);
-    println!("Flow ID prefix = {:?}", hex::encode(prefix_bytes));
-
     // Create PushBytesBuf for all raw bytes for F1
     let sig_f1_buf =
         PushBytesBuf::try_from(sig_f1.as_ref().to_vec()).expect("sig_f1 conversion failed");
-    let r_4b1_buf_f1 = PushBytesBuf::try_from(r_4b1.to_vec()).expect("r_4b1 conversion failed");
-    let r_4b0_buf_f1 = PushBytesBuf::try_from(r_4b0.to_vec()).expect("r_4b0 conversion failed");
-    let x_le_4_buf_f1 = PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed");
 
     // Now let's construct the message dynamically
     // Message is input_value, nonce[0..4], nonce[4..8]
@@ -287,12 +267,6 @@ pub fn online_execution(
     // Create PushBytesBuf for F2 values - new instances
     let sig_f2_buf =
         PushBytesBuf::try_from(sig_f2.as_ref().to_vec()).expect("sig_f2 conversion failed");
-    let r_4b1_buf_f2 =
-        PushBytesBuf::try_from(r_4b1.to_vec()).expect("r_4b1 conversion failed for F2");
-    let r_4b0_buf_f2 =
-        PushBytesBuf::try_from(r_4b0.to_vec()).expect("r_4b0 conversion failed for F2");
-    let x_le_4_buf_f2 =
-        PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed for F2");
 
     // -- Step F2 script
     let message = [
