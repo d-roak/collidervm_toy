@@ -25,3 +25,4 @@ CLAUDE.md
 
 # Ignore generated transaction files
 *.tx
+demo_params.env
