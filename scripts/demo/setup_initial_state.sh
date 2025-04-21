@@ -228,4 +228,6 @@ save_param "FUNDING_AMOUNT_SAT" "$funding_amount_sat" "$output_file"
 log "Initial state setup completed successfully."
 log "Funding TXID: $funding_txid"
 log "Funding Vout: $funding_vout"
-[[ $run_mode -eq $DRY_RUN ]] && log "Note: This was a dry run, no actual transactions were broadcast." 
+if [[ $run_mode -eq $DRY_RUN ]]; then
+  log "Note: This was a dry run, no actual transactions were broadcast."
+fi 
