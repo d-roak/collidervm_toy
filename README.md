@@ -1,4 +1,29 @@
+<div align="center">
+
+<a href="https://github.com/AbdelStark/collidervm_toy/actions/workflows/test.yml"><img alt="GitHub Workflow Status" src="https://img.shields.io/github/actions/workflow/status/AbdelStark/collidervm_toy/test.yml?style=for-the-badge" height=30></a>
+<a href="https://bitcoin.org/"> <img alt="Bitcoin" src="https://img.shields.io/badge/Bitcoin-000?style=for-the-badge&logo=bitcoin&logoColor=white" height=30></a>
+
+</div>
+
 # ColliderVM Toy Simulation
+
+<div align="center">
+  <h3>
+    <a href="https://github.com/AbdelStark/collidervm_toy/discussions/5">
+      DEMO
+    </a>
+    <span> | </span>
+    <a href="https://eprint.iacr.org/2025/591">
+      COLLIDERVM PAPER
+    </a>
+    <span> | </span>
+    <a href="https://github.com/AbdelStark/collidervm_toy?tab=readme-ov-file#how-to-run">
+      QUICKSTART
+    </a>
+  </h3>
+
+  <img src="./docs/images/collidervm-logo-concept.png" alt="Mikan" width="300">
+</div>
 
 This project provides a simplified Rust simulation of the concepts presented in the [ColliderVM: Stateful Computation on Bitcoin](https://eprint.iacr.org/2025/591) paper. It demonstrates the core mechanisms of ColliderVM, particularly the use of presigned transaction flows and hash collision challenges for enabling stateful computation on Bitcoin without relying on fraud proofs.
 
@@ -59,36 +84,6 @@ The codebase is organized into three main Rust modules:
     - `online_execution`: Simulates the Operator finding a nonce for a given input `x`, selecting the corresponding flow `d`, constructing the full witness and script, and executing the F1 and F2 scripts.
   - Uses helper functions and data structures from `collidervm_toy.rs`.
   - Uses `bitvm::execute_script_buf` to simulate the execution of the constructed Bitcoin scripts.
-
-```mermaid
-graph LR
-    subgraph Main Entry Point
-        A[main.rs]
-    end
-    subgraph Simulation Logic
-        B[simulation.rs]
-        D[run_simulation] --> E[offline_setup];
-        D --> F[online_execution];
-    end
-    subgraph Core Definitions & Helpers
-        C[collidervm_toy.rs]
-        G[Data Structures]
-        H[Constants]
-        I[Off-Chain Helpers: calculate_flow_id, find_valid_nonce]
-        J[Script Building: build_script_fX_locked]
-        K[Sighash Simulation: create_toy_sighash_message]
-    end
-
-    A -- Calls --> D
-    B -- Uses --> C
-
-    E -- Uses --> G; E -- Uses --> J; E -- Uses --> K
-    F -- Uses --> G; F -- Uses --> H; F -- Uses --> I; F -- Uses --> J
-
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style B fill:#ccf,stroke:#333,stroke-width:2px
-    style C fill:#cfc,stroke:#333,stroke-width:2px
-```
 
 ## Simulation End-to-End Flow
 
@@ -193,17 +188,7 @@ Options:
           Print version
 ```
 
-## Future Enhancements
-
-To create a more complete implementation, potential improvements include:
-
-- Generate actual, signable Bitcoin transaction templates using `bitcoin` library features.
-- Integrate with Bitcoin libraries for transaction construction and potentially broadcasting.
-- Handle UTXO management and transaction chaining realistically.
-- Implement efficient storage for the potentially large number of flows (`2^L`).
-- Improve the hash collision mechanism to ensure the same input `x` is used for both the hash and the logic of the functions.
-- Implement the double/triple collision resistant variants from the paper (Section 2.2).
-
 ## References
 
 - [ColliderVM: Stateful Computation on Bitcoin](https://eprint.iacr.org/2025/591)
+
