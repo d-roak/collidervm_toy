@@ -22,3 +22,6 @@ CLAUDE.md
 # Added by cargo
 
 /target
+
+# Ignore generated transaction files
+*.tx

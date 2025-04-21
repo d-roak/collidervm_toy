@@ -71,6 +71,8 @@ const REQUIRED_AMOUNT_SAT: u64 = 10_000;
 const L_PARAM: usize = 4;
 const B_PARAM: usize = 16; // multiple of 8 ≤ 32
 
+const OUTPUT_DIR: &str = "target/demo";
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -192,7 +194,7 @@ fn main() -> anyhow::Result<()> {
     let script_code =
         ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::from_slice(&signer_pkh.as_bytes())?);
     let mut sighash_cache = SighashCache::new(&mut tx_f1);
-    let sighash = sighash_cache.p2wpkh_signature_hash(
+    let sighash = sighash_cache.p2wsh_signature_hash(
         0,
         &script_code,
         Amount::from_sat(funding_value_sat),
@@ -203,9 +205,12 @@ fn main() -> anyhow::Result<()> {
     sig_ser.push(EcdsaSighashType::All as u8);
     tx_f1.input[0].witness = Witness::from_slice(&[sig_ser, pk_signer.serialize().to_vec()]);
 
+    // Create the output directory if it doesn't exist
+    fs::create_dir_all(OUTPUT_DIR)?;
+
     // Serialize & save
     let tx_f1_hex = serialize_hex(&tx_f1);
-    fs::write("f1.tx", &tx_f1_hex)?;
+    fs::write(format!("{}/f1.tx", OUTPUT_DIR), &tx_f1_hex)?;
     let tx_f1_id = tx_f1.compute_txid();
     println!("tx_f1 created  →  {}  (saved to f1.tx)", tx_f1_id);
 
@@ -237,7 +242,7 @@ fn main() -> anyhow::Result<()> {
 
     // Build the witness stack for the P2WSH spend
     let mut cache_f2 = SighashCache::new(&mut tx_f2);
-    let sighash_f2 = cache_f2.p2wpkh_signature_hash(
+    let sighash_f2 = cache_f2.p2wsh_signature_hash(
         0,
         &f1_lock,
         Amount::from_sat(f1_output_value),
@@ -255,7 +260,7 @@ fn main() -> anyhow::Result<()> {
         Witness::from_slice(&[sig_f2_ser, flow_id_enc, x_enc, f1_lock.to_bytes()]);
 
     let tx_f2_hex = serialize_hex(&tx_f2);
-    fs::write("f2.tx", &tx_f2_hex)?;
+    fs::write(format!("{}/f2.tx", OUTPUT_DIR), &tx_f2_hex)?;
     let tx_f2_id = tx_f2.compute_txid();
     println!("tx_f2 created  →  {}  (saved to f2.tx)", tx_f2_id);
 
