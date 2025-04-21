@@ -11,7 +11,7 @@ use bitcoin::{
 use bitvm::{execute_script_buf, hash::blake3::blake3_push_message_script_with_limb};
 use secp256k1::{Keypair, Secp256k1};
 
-use crate::collidervm_toy::{
+use crate::core::{
     ColliderVmConfig, F1_THRESHOLD, F2_THRESHOLD, OperatorInfo, PresignedFlow, PresignedStep,
     SignerInfo, build_script_f1_blake3_locked, build_script_f2_blake3_locked,
     create_toy_sighash_message, find_valid_nonce, flow_id_to_prefix_bytes,
