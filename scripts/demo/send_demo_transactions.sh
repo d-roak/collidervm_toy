@@ -112,7 +112,7 @@ send_transaction_file() {
     echo "$tx_id"
     return 0
   else
-    error "Failed to send transaction $tx_name from $tx_file using '$bitcoin_cli'."
+    error "Failed to send transaction $tx_name from $tx_file using 'Bitcoin CLI'."
   fi
 }
 
@@ -172,7 +172,8 @@ log "Using transaction directory: $tx_directory"
 
 # Set bitcoin-cli command
 bitcoin_cli=${BITCOIN_CLI_CMD_DEMO:-$DEFAULT_BITCOIN_CLI}
-log "Using bitcoin-cli command: $bitcoin_cli"
+# Don't log the bitcoin-cli command (need to sanitize the command to hide potential secrets)
+#log "Using bitcoin-cli command: $bitcoin_cli"
 
 # Verify bitcoin-cli works for live mode
 if [[ $run_mode -eq $LIVE_RUN ]]; then

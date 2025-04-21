@@ -148,7 +148,9 @@ log "Funding amount: $funding_amount_btc BTC"
 
 # Set bitcoin-cli command
 bitcoin_cli=${BITCOIN_CLI_CMD_DEMO:-$DEFAULT_BITCOIN_CLI}
-log "Using bitcoin-cli command: $bitcoin_cli"
+
+# Don't log the bitcoin-cli command (need to sanitize the command to hide potential secrets)
+#log "Using bitcoin-cli command: $bitcoin_cli"
 
 # Verify bitcoin-cli works in live mode
 if [[ $run_mode -eq $LIVE_RUN ]]; then
@@ -206,8 +208,8 @@ else
   # For live mode, optionally wait for confirmation
   # wait_for_confirmation "$funding_txid"
   # For now, we don't wait for confirmation and just pause for a few seconds
-  echo "Waiting for 10 seconds before getting transaction details..."
-  sleep 10
+  echo "Waiting for 3 seconds before getting transaction details..."
+  sleep 3
 
   # Find the vout corresponding to the signer address in live mode
   # This assumes the Signer address is unique in the outputs of this tx
