@@ -13,7 +13,7 @@
 //!     demo address on Signet and exits.
 //! 3.  **Offline phase** – given a funding UTXO, the program
 //!     * finds a nonce `r` such that `H(x‖r)|_B ∈ D` (using
-//!       `collidervm_toy::find_valid_nonce`).
+//!       `collidervm_toy::core::find_valid_nonce`).
 //!     * chooses the corresponding flow `d` and builds the **locking script**
 //!       for `F1` (and `F2`) using the existing helpers.
 //!     * constructs and signs **tx_f1** (spends the funding UTXO → P2WSH locked
@@ -21,25 +21,12 @@
 //! 4.  **Online phase** – it then builds and signs **tx_f2**, spending the F1
 //!     output with the witness `[sig, flow_id, x, script]`, paying the remaining
 //!     funds to an Operator address.
-//! 5.  Both transactions are written to `f1.tx` and `f2.tx` (raw hex), and all
-//!    relevant IDs / next steps are printed.
-//!
-//! ## Simplifications
-//! *  The on‑chain scripts use the same logic as the simulation **except** that
-//!    the expensive BLAKE3 prefix check is performed _off‑chain_.  The locking
-//!    scripts still enforce:
-//!       * Signer signature (`OP_CHECKSIGVERIFY`).
-//!       * Flow‑ID equality (`d` hard‑coded + `OP_EQUALVERIFY`).
-//!       * `x > 100` (F1) / `x < 200` (F2).
-//! *  This keeps the core "input consistency" property while making the script
-//!    compact enough to be broadcast on Signet without the custom BitVM
-//!    opcodes.  Extending the code to embed the full `blake3_compute_script`
-//!    is left as an exercise for further work.
+//! 5.  Both transactions are written to `f1.tx` and `f2.tx` (raw hex), and all relevant IDs / next steps are printed.
 //!
 //! ## Build & run
 //! ```bash
-//! cargo run --bin collidervm_demo -- -x 150           # prints funding instr.
-//! cargo run --bin collidervm_demo -- -x 150 -f <txid> # builds f1.tx + f2.tx
+//! cargo run --bin demo -- -x 150           # prints funding instr.
+//! cargo run --bin demo -- -x 150 -f <txid> # builds f1.tx + f2.tx
 //! ```
 
 #![allow(clippy::too_many_arguments)]
@@ -303,7 +290,7 @@ fn main() -> anyhow::Result<()> {
         .program() // 20 bytes = hash160(pubkey)
         .to_owned();
     let script_code =
-        ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::from_slice(&signer_pkh.as_bytes())?);
+        ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::from_slice(signer_pkh.as_bytes())?);
     let mut sighash_cache = SighashCache::new(&mut tx_f1);
     let sighash = sighash_cache.p2wsh_signature_hash(
         0,
@@ -447,7 +434,7 @@ fn encode_scriptnum(n: i64) -> Vec<u8> {
     if n == 0 {
         return vec![];
     }
-    let mut abs = n.abs() as u64;
+    let mut abs = n.unsigned_abs();
     let mut out = Vec::new();
     while abs > 0 {
         out.push((abs & 0xff) as u8);
