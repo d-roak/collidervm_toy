@@ -1,11 +1,11 @@
 // src/main.rs
 #![feature(proc_macro_hygiene)]
 
-mod collidervm_toy;
-mod simulation;
-
 use clap::{Parser, ValueEnum};
-use collidervm_toy::{ColliderVmConfig, benchmark_hash_rate};
+use collidervm_toy::{
+    core::{ColliderVmConfig, benchmark_hash_rate},
+    simulation,
+};
 use colored::*;
 
 #[derive(Parser)]
