@@ -1,7 +1,9 @@
 # Witness Construction for `build_script_f1_blake3_locked`
 
 ## Context
+
 `build_script_f1_blake3_locked` is the locking script that enforces the F1 condition:
+
 1. The Schnorr signature must be valid.
 2. The public integer `x` must be greater than `F1_THRESHOLD` (100).
 3. A BLAKE3 hash of the **12‑byte message** `x || r` must start with the nibble‑prefix that identifies the flow.
@@ -12,9 +14,9 @@ The witness therefore has to leave the stack in a very specific state before the
 
 ## Current Witness Layout
 
-The witness is *two* little helper scripts that run **before** the locking script:
+The witness is _two_ little helper scripts that run **before** the locking script:
 
-1. **`push_compiled`** – produced by `blake3_push_message_script_with_limb`.
+1. **`msg_push_script`** – produced by `blake3_push_message_script_with_limb`.
    This script simply pushes the 12 raw bytes that form the message.
    With `limb_len = 4` we end up with three 4‑byte pushes:
 
@@ -24,7 +26,7 @@ The witness is *two* little helper scripts that run **before** the locking scrip
    limb‑0 (bytes 0‑3)
    ```
 
-2. **`witness_f1`** – handcrafted with `Builder::new()`.
+2. **`x_sig_script`** – handcrafted with `Builder::new()`.
    It pushes
    ```text
    x     – the integer value (as Script number)
@@ -35,11 +37,12 @@ Put together we get this byte stream which the VM executes from **left → right
 
 ```text
 ┌──────────────────┐┌──────────────────┐┌────────────────────┐
-│ push_compiled    ││ witness_f1       ││ locking_script (F1)│
+│ msg_push_script  ││ x_sig_script     ││ locking_script (F1)│
 └──────────────────┘└──────────────────┘└────────────────────┘
 ```
 
 ### Stack just before the locking script
+
 After the two witness chunks have executed the stack (top first) looks like:
 
 ```text
@@ -81,6 +84,7 @@ If every step passes the final stack is `[1]` and F1 is satisfied.
 ---
 
 ## Weakness in the Current Construction
+
 Nothing enforces that
 
 ```text
@@ -103,8 +107,9 @@ This breaks the intended semantics.
 # Roadmap to Improve the Toy Prototype
 
 1. **Enforce `x` Consistency**
-   * Reconstruct the 4‑byte little‑endian `x` from the message limbs and compare it with the numeric `x` already on the stack.
-   * Sketch:
+
+   - Reconstruct the 4‑byte little‑endian `x` from the message limbs and compare it with the numeric `x` already on the stack.
+   - Sketch:
      ```text
      <after pushing limbs>
      OP_DUP OP_DUP OP_ADD …   -- fold 4 bytes into one Script number
@@ -113,14 +118,16 @@ This breaks the intended semantics.
      ```
 
 2. **Clean Witness Layout**
-   * Pass **only** `x` and `r` (as numbers or raw bytes).
-   * Build the 12‑byte message **inside** the script (currently impossible todo efficintly without `OP_CAT`)
+
+   - Pass **only** `x` and `r` (as numbers or raw bytes).
+   - Build the 12‑byte message **inside** the script (currently impossible todo efficintly without `OP_CAT`)
 
 3. **Support Multiple Signers**
-   * Extend witness so that *k‑of‑n* Schnorr signatures are provided.
-   * Replace `OP_CHECKSIGVERIFY` with a mini‑threshold‑sig routine (`OP_CHECKSIG`, counting successes).
+
+   - Extend witness so that _k‑of‑n_ Schnorr signatures are provided.
+   - Replace `OP_CHECKSIGVERIFY` with a mini‑threshold‑sig routine (`OP_CHECKSIG`, counting successes).
 
 4. **Generalise to F1…F4**
-   * Implement F3/F4 to demonstrate the full protocol flow described in the paper.
+   - Implement F3/F4 to demonstrate the full protocol flow described in the paper.
 
-By completing the tasks above this toy implementation will align much more closely with the ColliderVM reference protocol described in the paper. 
+By completing the tasks above this toy implementation will align much more closely with the ColliderVM reference protocol described in the paper.

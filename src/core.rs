@@ -629,18 +629,6 @@ mod tests {
             .into_script();
 
         // 4) BLAKE3 compute snippet - OPTIMIZED
-        // Construct the message to be hashed, similar to the calculate_flow_id function
-        // input is 4 bytes, nonce is 8 bytes
-        let message = [
-            input_value.to_le_bytes(),
-            nonce.to_le_bytes()[0..4].try_into().unwrap(),
-            nonce.to_le_bytes()[4..8].try_into().unwrap(),
-        ]
-        .concat();
-        println!("message: {}", hex::encode(message.clone()));
-        let push_compiled = blake3_push_message_script_with_limb(&message, limb_len).compile();
-        let push_script = ScriptBuf::from_bytes(push_compiled.to_bytes());
-
         let compute_compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
         let compute_optimized = optimizer::optimize(compute_compiled);
         let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
@@ -648,10 +636,8 @@ mod tests {
         // 5) drop limbs we don't need for prefix check
         // Needed nibbles: prefix_len (because now represented as nibbles) or B / 4
         let needed_nibbles = prefix_len;
-        println!("needed_nibbles: {}", needed_nibbles);
         let blake3_script_hash_len_nibbles = 64;
         let to_drop = blake3_script_hash_len_nibbles - needed_nibbles;
-        println!("to_drop: {}", to_drop);
         let drop_script = {
             let mut b = Builder::new();
             for _ in 0..to_drop {
@@ -673,7 +659,6 @@ mod tests {
             sig_check,
             x_greater_check,
             reorder_for_blake,
-            push_script,
             compute_script,
             drop_script,
             prefix_script,
@@ -707,14 +692,14 @@ mod tests {
             PushBytesBuf::try_from(x_le_4.to_vec()).expect("x_le_4 conversion failed");
 
         // -- Step F1 script
-        let witness_f1 = {
+        let x_sig_script = {
             let mut b = Builder::new();
             b = b.push_int(input_value as i64);
             b = b.push_slice(sig_f1_buf);
             b.into_script()
         };
 
-        let mut full_f1 = witness_f1.to_bytes();
+        let mut full_f1 = x_sig_script.to_bytes();
         full_f1.extend(f1_locking_script.to_bytes());
         let exec_f1_script = ScriptBuf::from_bytes(full_f1);
 
@@ -729,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_encoding() {
-        let witness_f1 = {
+        let x_sig_script = {
             let mut b = Builder::new();
             b = b.push_int(0x00_i64);
             b = b.push_int(0x0d_i64);
@@ -737,7 +722,7 @@ mod tests {
             b = b.push_int(0x00_i64);
             b.into_script()
         };
-        println!("witness_f1: {}", witness_f1);
+        println!("x_sig_script: {}", x_sig_script);
 
         // flow id prefix: 000d0000
         let flow_id_prefix = vec![0x00, 0x0d, 0x00, 0x00];
@@ -745,7 +730,7 @@ mod tests {
 
         let locking_script = combine_scripts(&[script_part_1, script! {OP_TRUE}.compile()]);
 
-        let mut full_f1 = witness_f1.to_bytes();
+        let mut full_f1 = x_sig_script.to_bytes();
         full_f1.extend(locking_script.to_bytes());
         let exec_f1_script = ScriptBuf::from_bytes(full_f1);
         println!("exec_f1_script: {}", exec_f1_script);
@@ -764,7 +749,8 @@ mod tests {
         let message = [
             0x7b, 0x00, 0x00, 0x00, 0xd9, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
-        let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
+        let msg_push_script = blake3_push_message_script_with_limb(&message, 4).compile();
+        let push_script = ScriptBuf::from_bytes(msg_push_script.to_bytes());
 
         let total_msg_len = 12;
         let limb_len = 4;
@@ -774,7 +760,7 @@ mod tests {
 
         let locking_script = combine_scripts(&[compute_script]);
 
-        let witness = push_compiled;
+        let witness = push_script;
 
         let mut full_f1 = witness.to_bytes();
         full_f1.extend(locking_script.to_bytes());
@@ -833,9 +819,6 @@ mod tests {
             .into_script();
 
         // 4) BLAKE3 compute snippet - OPTIMIZED
-        // Construct the message to be hashed, similar to the calculate_flow_id function
-        // input is 4 bytes, nonce is 8 bytes
-
         let compute_compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
         let compute_optimized = optimizer::optimize(compute_compiled);
         let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
@@ -843,10 +826,8 @@ mod tests {
         // 5) drop limbs we don't need for prefix check
         // Needed nibbles: prefix_len (because now represented as nibbles) or B / 4
         let needed_nibbles = prefix_len;
-        println!("needed_nibbles: {}", needed_nibbles);
         let blake3_script_hash_len_nibbles = 64;
         let to_drop = blake3_script_hash_len_nibbles - needed_nibbles;
-        println!("to_drop: {}", to_drop);
         let drop_script = {
             let mut b = Builder::new();
             for _ in 0..to_drop {
@@ -903,18 +884,19 @@ mod tests {
         let message = [
             0x7b, 0x00, 0x00, 0x00, 0xd9, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
-        let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
+        let msg_push_script = blake3_push_message_script_with_limb(&message, 4).compile();
+        let push_script = ScriptBuf::from_bytes(msg_push_script.to_bytes());
 
         // -- Step F1 script
-        let witness_f1 = {
+        let x_sig_script = {
             let mut b = Builder::new();
             b = b.push_int(input_value as i64);
             b = b.push_slice(sig_f1_buf);
             b.into_script()
         };
 
-        let mut full_f1 = push_compiled.to_bytes();
-        full_f1.extend(witness_f1.to_bytes());
+        let mut full_f1 = push_script.to_bytes();
+        full_f1.extend(x_sig_script.to_bytes());
         full_f1.extend(f1_locking_script.to_bytes());
         let exec_f1_script = ScriptBuf::from_bytes(full_f1);
 

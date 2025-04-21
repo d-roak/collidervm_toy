@@ -349,7 +349,7 @@ pub fn online_execution(
         nonce.to_le_bytes()[4..8].try_into().unwrap(),
     ]
     .concat();
-    let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
+    let msg_push_script_f1 = blake3_push_message_script_with_limb(&message, 4).compile();
 
     // -- Step F1 script
     println!(
@@ -358,15 +358,15 @@ pub fn online_execution(
         flow_id
     );
     thread::sleep(Duration::from_millis(300));
-    let witness_f1 = {
+    let x_sig_script_f1 = {
         let mut b = Builder::new();
         b = b.push_int(input_value as i64);
         b = b.push_slice(sig_f1_buf);
         b.into_script()
     };
 
-    let mut full_f1 = push_compiled.to_bytes();
-    full_f1.extend(witness_f1.to_bytes());
+    let mut full_f1 = msg_push_script_f1.to_bytes();
+    full_f1.extend(x_sig_script_f1.to_bytes());
     full_f1.extend(step_f1.locking_script.to_bytes());
     let exec_f1_script = ScriptBuf::from_bytes(full_f1);
 
@@ -401,17 +401,17 @@ pub fn online_execution(
         nonce.to_le_bytes()[4..8].try_into().unwrap(),
     ]
     .concat();
-    let push_compiled = blake3_push_message_script_with_limb(&message, 4).compile();
+    let msg_push_script_f2 = blake3_push_message_script_with_limb(&message, 4).compile();
 
-    let witness_f2 = {
+    let x_sig_script_f2 = {
         let mut b = Builder::new();
         b = b.push_int(input_value as i64);
         b = b.push_slice(sig_f2_buf);
         b.into_script()
     };
 
-    let mut full_f2 = push_compiled.to_bytes();
-    full_f2.extend(witness_f2.to_bytes());
+    let mut full_f2 = msg_push_script_f2.to_bytes();
+    full_f2.extend(x_sig_script_f2.to_bytes());
     full_f2.extend(step_f2.locking_script.to_bytes());
     let exec_f2_script = ScriptBuf::from_bytes(full_f2);
 
