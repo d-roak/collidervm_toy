@@ -20,6 +20,15 @@
         "doc",
         "ideas"
       ]
+    },
+    {
+      "login": "eigmax",
+      "name": "Stephen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/81497928?v=4",
+      "profile": "https://github.com/eigmax",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,

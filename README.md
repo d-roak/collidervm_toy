@@ -217,6 +217,7 @@ Thanks goes to these wonderful people ([emoji key](https://allcontributors.org/d
   <tbody>
     <tr>
       <td align="center" valign="top" width="14.28%"><a href="https://github.com/AbdelStark"><img src="https://avatars.githubusercontent.com/u/45264458?v=4?s=100" width="100px;" alt="A₿del ∞/21M"/><br /><sub><b>A₿del ∞/21M</b></sub></a><br /><a href="https://github.com/AbdelStark/collidervm_toy/commits?author=AbdelStark" title="Code">💻</a> <a href="https://github.com/AbdelStark/collidervm_toy/commits?author=AbdelStark" title="Documentation">📖</a> <a href="#ideas-AbdelStark" title="Ideas, Planning, & Feedback">🤔</a></td>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/eigmax"><img src="https://avatars.githubusercontent.com/u/81497928?v=4?s=100" width="100px;" alt="Stephen"/><br /><sub><b>Stephen</b></sub></a><br /><a href="https://github.com/AbdelStark/collidervm_toy/commits?author=eigmax" title="Code">💻</a></td>
     </tr>
   </tbody>
 </table>
