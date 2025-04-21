@@ -157,8 +157,10 @@ if [[ ! -d "$tx_directory" ]]; then
     error "Specified directory does not exist: $tx_directory"
 fi
 
-# Check dependencies
-check_jq
+# Check dependencies for live mode
+if [[ $run_mode -eq $LIVE_RUN ]]; then
+  check_jq
+fi
 
 ################################################################################
 #                              INITIALIZATION                                    #
@@ -172,9 +174,11 @@ log "Using transaction directory: $tx_directory"
 bitcoin_cli=${BITCOIN_CLI_CMD_DEMO:-$DEFAULT_BITCOIN_CLI}
 log "Using bitcoin-cli command: $bitcoin_cli"
 
-# Verify bitcoin-cli works
-if ! $bitcoin_cli getblockchaininfo > /dev/null 2>&1; then
-    error "Failed to execute bitcoin-cli command: $bitcoin_cli. Check configuration and node status."
+# Verify bitcoin-cli works for live mode
+if [[ $run_mode -eq $LIVE_RUN ]]; then
+  if ! $bitcoin_cli getblockchaininfo > /dev/null 2>&1; then
+      error "Failed to execute bitcoin-cli command: $bitcoin_cli. Check configuration and node status."
+  fi
 fi
 
 ################################################################################
@@ -183,6 +187,7 @@ fi
 
 # Send F1
 tx_f1_file="$tx_directory/f1.tx"
+# Capture the output of send_transaction_file in a variable to prevent log message interleaving
 tx_f1_id=$(send_transaction_file "$tx_f1_file" "F1" "$run_mode")
 
 # Optionally wait for F1 confirmation
@@ -190,10 +195,13 @@ if [[ "$wait_confirm" == true && "$run_mode" == $LIVE_RUN ]]; then
     wait_for_confirmation "$tx_f1_id" "F1"
 elif [[ "$wait_confirm" == true && "$run_mode" == $DRY_RUN ]]; then
     log "[DRY RUN] Would wait for F1 confirmation (TXID: $tx_f1_id)"
+    # Simulate a short wait in dry run mode
+    sleep 2
 fi
 
 # Send F2
 tx_f2_file="$tx_directory/f2.tx"
+# Capture the output of send_transaction_file in a variable to prevent log message interleaving
 tx_f2_id=$(send_transaction_file "$tx_f2_file" "F2" "$run_mode")
 
 ################################################################################

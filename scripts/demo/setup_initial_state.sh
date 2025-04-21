@@ -17,13 +17,16 @@ readonly DEFAULT_BITCOIN_CLI="bitcoin-cli -signet"
 readonly DEFAULT_FUNDING_AMOUNT_BTC="0.0002"
 # Amount required by the demo binary (in satoshis)
 readonly REQUIRED_AMOUNT_SAT=10000
+# Enable dry run mode (no actual bitcoin-cli calls)
+readonly DRY_RUN=0
+readonly LIVE_RUN=1
 
 ################################################################################
 #                                  FUNCTIONS                                     #
 ################################################################################
 
 print_usage() {
-  echo "Usage: $0 -o|--output <output_file> [-a|--amount <btc_amount>]"
+  echo "Usage: $0 -o|--output <output_file> [-a|--amount <btc_amount>] [-d|--dry-run]"
   echo
   echo "Setup the initial funding transaction for the ColliderVM demo."
   echo "Reads SIGNER_ADDRESS from the output file and funds it."
@@ -33,6 +36,7 @@ print_usage() {
   echo
   echo "Optional arguments:"
   echo "  -a, --amount        Amount of BTC to fund (default: $DEFAULT_FUNDING_AMOUNT_BTC)"
+  echo "  -d, --dry-run       Run in dry-run mode (simulate funding without actual bitcoin-cli calls)"
   echo
   echo "Environment variables:"
   echo "  BITCOIN_CLI_CMD_DEMO  Override default bitcoin-cli command (default: '$DEFAULT_BITCOIN_CLI')"
@@ -97,6 +101,7 @@ wait_for_confirmation() {
 
 funding_amount_btc=$DEFAULT_FUNDING_AMOUNT_BTC
 output_file=""
+run_mode=$LIVE_RUN
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -107,6 +112,10 @@ while [[ $# -gt 0 ]]; do
     -a|--amount)
       funding_amount_btc=$2
       shift 2
+      ;;
+    -d|--dry-run)
+      run_mode=$DRY_RUN
+      shift
       ;;
     *)
       print_usage
@@ -123,8 +132,10 @@ if ! [[ $funding_amount_btc =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   error "Invalid amount specified: $funding_amount_btc"
 fi
 
-# Check dependencies
-check_jq
+# Check dependencies for live mode
+if [[ $run_mode -eq $LIVE_RUN ]]; then
+  check_jq
+fi
 
 ################################################################################
 #                              INITIALIZATION                                    #
@@ -133,17 +144,17 @@ check_jq
 log "Starting initial state setup"
 log "Output file: $output_file"
 log "Funding amount: $funding_amount_btc BTC"
+[[ $run_mode -eq $DRY_RUN ]] && log "Running in DRY RUN mode - no bitcoin-cli commands will be executed"
 
 # Set bitcoin-cli command
 bitcoin_cli=${BITCOIN_CLI_CMD_DEMO:-$DEFAULT_BITCOIN_CLI}
-# Use catnet-bitcoin-cli for now
-# TODO: Use the correct command for regular signet, testnet and mainnet
-#bitcoin_cli=eval "catnet-bitcoin-cli"
 log "Using bitcoin-cli command: $bitcoin_cli"
 
-# Verify bitcoin-cli works
-if ! $bitcoin_cli getblockchaininfo > /dev/null 2>&1; then
-    error "Failed to execute bitcoin-cli command: $bitcoin_cli. Check configuration and node status."
+# Verify bitcoin-cli works in live mode
+if [[ $run_mode -eq $LIVE_RUN ]]; then
+  if ! $bitcoin_cli getblockchaininfo > /dev/null 2>&1; then
+      error "Failed to execute bitcoin-cli command: $bitcoin_cli. Check configuration and node status."
+  fi
 fi
 
 # Load existing parameters (SIGNER_ADDRESS is needed)
@@ -170,32 +181,44 @@ fi
 
 log "Funding the Signer Address: $SIGNER_ADDRESS"
 
-log "Sending $funding_amount_btc BTC to $SIGNER_ADDRESS..."
-funding_txid=$($bitcoin_cli sendtoaddress "$SIGNER_ADDRESS" "$funding_amount_btc")
+if [[ $run_mode -eq $DRY_RUN ]]; then
+  # Generate a simulated transaction ID in dry run mode
+  funding_txid="dry_run_funding_txid_$(date +%s)"
+  log "[DRY RUN] Simulating sendtoaddress: $funding_txid"
+else
+  # Execute the actual bitcoin-cli command in live mode
+  log "Sending $funding_amount_btc BTC to $SIGNER_ADDRESS..."
+  funding_txid=$($bitcoin_cli sendtoaddress "$SIGNER_ADDRESS" "$funding_amount_btc")
 
-if [[ -z "$funding_txid" ]]; then
-  error "Failed to send funding transaction using '$bitcoin_cli'. Check wallet balance and node status."
+  if [[ -z "$funding_txid" ]]; then
+    error "Failed to send funding transaction using '$bitcoin_cli'. Check wallet balance and node status."
+  fi
 fi
 
 log "Funding transaction broadcast successfully. TXID: $funding_txid"
 save_param "FUNDING_TXID" "$funding_txid" "$output_file"
 
-# Optional: Wait for confirmation
-#wait_for_confirmation "$funding_txid"
-# For now, we don't wait for confirmation and instead we just pause for 10 seconds
-echo "Waiting for 10 seconds before getting transaction details..."
-sleep 10
+if [[ $run_mode -eq $DRY_RUN ]]; then
+  # In dry run mode, simulate a funding vout of 0
+  funding_vout=0
+  log "[DRY RUN] Simulating vout: $funding_vout"
+else
+  # For live mode, optionally wait for confirmation
+  # wait_for_confirmation "$funding_txid"
+  # For now, we don't wait for confirmation and just pause for a few seconds
+  echo "Waiting for 10 seconds before getting transaction details..."
+  sleep 10
 
-# Find the vout corresponding to the signer address
-# This assumes the Signer address is unique in the outputs of this tx
-# In a more complex wallet, finding the correct vout might need more logic
-log "Getting transaction details to find the correct vout..."
-tx_details=$($bitcoin_cli gettransaction "$funding_txid" true) # Get verbose transaction details
+  # Find the vout corresponding to the signer address in live mode
+  # This assumes the Signer address is unique in the outputs of this tx
+  log "Getting transaction details to find the correct vout..."
+  tx_details=$($bitcoin_cli gettransaction "$funding_txid" true) # Get verbose transaction details
 
-funding_vout=$(echo "$tx_details" | jq --arg addr "$SIGNER_ADDRESS" -r '.details[] | select(.address == $addr) | .vout')
+  funding_vout=$(echo "$tx_details" | jq --arg addr "$SIGNER_ADDRESS" -r '.details[] | select(.address == $addr) | .vout')
 
-if [[ -z "$funding_vout" || ! "$funding_vout" =~ ^[0-9]+$ ]]; then
-  error "Could not automatically determine the vout for address $SIGNER_ADDRESS in TXID $funding_txid. Manual intervention might be needed. TX Details: $tx_details"
+  if [[ -z "$funding_vout" || ! "$funding_vout" =~ ^[0-9]+$ ]]; then
+    error "Could not automatically determine the vout for address $SIGNER_ADDRESS in TXID $funding_txid. Manual intervention might be needed."
+  fi
 fi
 
 log "Found vout $funding_vout sending to $SIGNER_ADDRESS in TXID $funding_txid."
@@ -204,4 +227,5 @@ save_param "FUNDING_AMOUNT_SAT" "$funding_amount_sat" "$output_file"
 
 log "Initial state setup completed successfully."
 log "Funding TXID: $funding_txid"
-log "Funding Vout: $funding_vout" 
+log "Funding Vout: $funding_vout"
+[[ $run_mode -eq $DRY_RUN ]] && log "Note: This was a dry run, no actual transactions were broadcast." 

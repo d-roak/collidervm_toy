@@ -6,15 +6,15 @@
 //! end‑to‑end flow that users can broadcast on Signet.
 //!
 //! # High‑level flow
-//! 1.  **Key generation** – by default the program creates one Signer key and
+//! 1.  **Key generation** – by default the program creates one Signer key and
 //!     one Operator key and prints them (WIF + address).
 //! 2.  **Funding phase** – if the user has _not_ supplied a `funding_txid`, the
 //!     program prints clear CLI instructions telling the user how to fund the
 //!     demo address on Signet and exits.
 //! 3.  **Offline phase** – given a funding UTXO, the program
-//!     * finds a nonce `r` such that `H(x‖r)|_B ∈ D` (using
+//!     * finds a nonce `r` such that `H(x‖r)|_B ∈ D` (using
 //!       `collidervm_toy::find_valid_nonce`).
-//!     * chooses the corresponding flow `d` and builds the **locking script**
+//!     * chooses the corresponding flow `d` and builds the **locking script**
 //!       for `F1` (and `F2`) using the existing helpers.
 //!     * constructs and signs **tx_f1** (spends the funding UTXO → P2WSH locked
 //!       by the `F1` program).
@@ -30,7 +30,7 @@
 //!    scripts still enforce:
 //!       * Signer signature (`OP_CHECKSIGVERIFY`).
 //!       * Flow‑ID equality (`d` hard‑coded + `OP_EQUALVERIFY`).
-//!       * `x > 100` (F1) / `x < 200` (F2).
+//!       * `x > 100` (F1) / `x < 200` (F2).
 //! *  This keeps the core "input consistency" property while making the script
 //!    compact enough to be broadcast on Signet without the custom BitVM
 //!    opcodes.  Extending the code to embed the full `blake3_compute_script`
@@ -38,7 +38,7 @@
 //!
 //! ## Build & run
 //! ```bash
-//! cargo run --bin collidervm_demo -- -x 150           # prints funding instr.
+//! cargo run --bin collidervm_demo -- -x 150           # prints funding instr.
 //! cargo run --bin collidervm_demo -- -x 150 -f <txid> # builds f1.tx + f2.tx
 //! ```
 
@@ -59,44 +59,100 @@ use bitcoin::{
 };
 use clap::Parser;
 use colored::*;
+use serde::Serialize;
 
 use collidervm_toy::core::{
     build_script_f1_blake3_locked, build_script_f2_blake3_locked, find_valid_nonce,
     flow_id_to_prefix_bytes,
 };
 
-/// Minimal amount we ask the user to deposit (10 000 sat ≈ 0.0001 BTC)
+/// Minimal amount we ask the user to deposit (10 000 sat ≈ 0.0001 BTC)
 const REQUIRED_AMOUNT_SAT: u64 = 10_000;
 /// Hard‑coded ColliderVM parameters (match the toy simulation)
 const L_PARAM: usize = 4;
-const B_PARAM: usize = 16; // multiple of 8 ≤ 32
+const B_PARAM: usize = 16; // multiple of 8 ≤ 32
 
 const OUTPUT_DIR: &str = "target/demo";
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Input value x (checked by F1 > 100 and F2 < 200)
+    /// Input value x (checked by F1 > 100 and F2 < 200)
     #[arg(short, long, default_value_t = 114)]
     x: u32,
 
-    /// Funding transaction ID (hex) that pays at least 10 000 sat to the demo address
+    /// Funding transaction ID (hex) that pays at least 10 000 sat to the demo address
     #[arg(short, long)]
     funding_txid: Option<String>,
 
-    /// Optional vout index for the funding TX (default 0)
+    /// Optional vout index for the funding TX (default 0)
     #[arg(long, default_value_t = 0)]
     funding_vout: u32,
 
-    /// Fee‑rate in sat/vB (default = 1 sat/vB, plenty for Signet)
+    /// Fee‑rate in sat/vB (default = 1 sat/vB, plenty for Signet)
     #[arg(long, default_value_t = 1)]
     fee_rate: u64,
+
+    /// Output in JSON format for easier parsing
+    #[arg(long)]
+    json: bool,
+
+    /// Write JSON output to a file instead of stdout
+    #[arg(long)]
+    json_output_file: Option<String>,
+}
+
+/// Structure for serializing key details to JSON
+#[derive(Serialize)]
+struct KeyInfo {
+    signer: KeyPair,
+    operator: KeyPair,
+}
+
+/// Structure for serializing individual key pairs to JSON
+#[derive(Serialize)]
+struct KeyPair {
+    address: String,
+    wif: String,
+}
+
+/// Structure for serializing transaction details to JSON
+#[derive(Serialize)]
+struct TransactionInfo {
+    f1: TxInfo,
+    f2: TxInfo,
+    nonce: u64,
+    flow_id: u32,
+}
+
+/// Structure for serializing individual transaction information
+#[derive(Serialize)]
+struct TxInfo {
+    txid: String,
+    file_path: String,
+}
+
+/// Complete demo output for JSON serialization
+#[derive(Serialize)]
+struct DemoOutput {
+    keys: KeyInfo,
+    transactions: Option<TransactionInfo>,
+    input_x: u32,
+    parameters: DemoParameters,
+}
+
+/// Parameters used in the demo for JSON serialization
+#[derive(Serialize)]
+struct DemoParameters {
+    required_amount_sat: u64,
+    l_param: usize,
+    b_param: usize,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // 0. Generate Signer & Operator keys (for demo we use 1‑of‑1)
+    // 0. Generate Signer & Operator keys (for demo we use 1‑of‑1)
     let secp: Secp256k1<secp256k1::All> = Secp256k1::new();
     let (sk_signer, pk_signer) = secp.generate_keypair(&mut rand::thread_rng());
     let signer_compressed_pk =
@@ -108,26 +164,78 @@ fn main() -> anyhow::Result<()> {
         CompressedPublicKey::try_from(bitcoin::PublicKey::new(pk_operator)).unwrap();
     let operator_addr = Address::p2wpkh(&operator_compressed_pk, Network::Signet);
 
-    println!(
-        "{}\n  Signer  → {} (WIF {})\n  Operator→ {} (WIF {})\n{}",
-        "Generated demo keys:".bold().blue(),
-        signer_addr,
-        sk_to_wif(&sk_signer),
-        operator_addr,
-        sk_to_wif(&sk_operator),
-        "---------------------------------------------".dimmed()
-    );
+    // Prepare key information for output
+    let key_info = KeyInfo {
+        signer: KeyPair {
+            address: signer_addr.to_string(),
+            wif: sk_to_wif(&sk_signer),
+        },
+        operator: KeyPair {
+            address: operator_addr.to_string(),
+            wif: sk_to_wif(&sk_operator),
+        },
+    };
+
+    // Prepare demo output structure for JSON output
+    let mut demo_output = DemoOutput {
+        keys: key_info,
+        transactions: None,
+        input_x: args.x,
+        parameters: DemoParameters {
+            required_amount_sat: REQUIRED_AMOUNT_SAT,
+            l_param: L_PARAM,
+            b_param: B_PARAM,
+        },
+    };
+
+    // If not using JSON, print key information in formatted text
+    if !args.json {
+        println!(
+            "{}\n  Signer  → {} (WIF {})\n  Operator→ {} (WIF {})\n{}",
+            "Generated demo keys:".bold().blue(),
+            signer_addr,
+            sk_to_wif(&sk_signer),
+            operator_addr,
+            sk_to_wif(&sk_operator),
+            "---------------------------------------------".dimmed()
+        );
+    }
 
     // If the user did not supply a funding_txid, print instructions & exit
     if args.funding_txid.is_none() {
-        print_funding_instructions(&signer_addr);
+        if args.json {
+            // Output JSON without transaction info
+            let json_output = serde_json::to_string_pretty(&demo_output)?;
+
+            // If a JSON output file is specified, write to it
+            if let Some(file_path) = &args.json_output_file {
+                fs::create_dir_all(
+                    std::path::Path::new(file_path)
+                        .parent()
+                        .unwrap_or(std::path::Path::new("./")),
+                )?;
+                fs::write(file_path, &json_output)?;
+            } else {
+                // Otherwise print to stdout
+                println!("{}", json_output);
+            }
+        } else {
+            print_funding_instructions(&signer_addr);
+        }
         return Ok(());
     }
 
     // --------------------------------------------------------------------
-    // 1. Parse CLI funding UTXO
+    // 1. Parse CLI funding UTXO
     // --------------------------------------------------------------------
-    let funding_txid = Txid::from_str(&args.funding_txid.as_ref().unwrap()[..])?;
+    let funding_txid_str = args.funding_txid.as_ref().unwrap();
+    let funding_txid = if funding_txid_str.starts_with("dry_run") {
+        // In dry run mode, use a placeholder txid
+        Txid::all_zeros()
+    } else {
+        // In normal mode, parse the real txid
+        Txid::from_str(funding_txid_str)?
+    };
     let funding_outpoint = OutPoint {
         txid: funding_txid,
         vout: args.funding_vout,
@@ -135,22 +243,25 @@ fn main() -> anyhow::Result<()> {
 
     // In a production‑ready tool we would RPC‑query the node to retrieve the
     // exact amount & pkScript of the funding UTXO.  To keep the demo
-    // self‑contained we *assume* the UTXO pays `REQUIRED_AMOUNT_SAT` to the
-    // Signer’s P2WPKH address.  The instructions ensured the user sends that.
+    // self‑contained we *assume* the UTXO pays `REQUIRED_AMOUNT_SAT` to the
+    // Signer's P2WPKH address.  The instructions ensured the user sends that.
     let funding_value_sat = REQUIRED_AMOUNT_SAT;
 
     // --------------------------------------------------------------------
-    // 2. Find nonce r & flow‑id d  (operator work)
+    // 2. Find nonce r & flow‑id d  (operator work)
     // --------------------------------------------------------------------
     let (nonce, flow_id, _hash) =
         find_valid_nonce(args.x, B_PARAM, L_PARAM).expect("nonce search should succeed quickly");
-    println!(
-        "Found nonce r = {} selecting flow d = {} (B={} bits, L={})",
-        nonce, flow_id, B_PARAM, L_PARAM
-    );
+
+    if !args.json {
+        println!(
+            "Found nonce r = {} selecting flow d = {} (B={} bits, L={})",
+            nonce, flow_id, B_PARAM, L_PARAM
+        );
+    }
 
     // --------------------------------------------------------------------
-    // 3. Build locking scripts for F1 & F2 (for the chosen flow)
+    // 3. Build locking scripts for F1 & F2 (for the chosen flow)
     // --------------------------------------------------------------------
     let prefix_nibbles = flow_id_to_prefix_bytes(flow_id, B_PARAM);
     let f1_lock =
@@ -163,9 +274,9 @@ fn main() -> anyhow::Result<()> {
     let f1_spk = ScriptBuf::new_p2wsh(&f1_wsh);
 
     // --------------------------------------------------------------------
-    // 4. Construct tx_f1  (funding → F1 output)
+    // 4. Construct tx_f1  (funding → F1 output)
     // --------------------------------------------------------------------
-    let fee_f1 = estimate_fee_vbytes(155, args.fee_rate); // ~1 input + 1 output
+    let fee_f1 = estimate_fee_vbytes(155, args.fee_rate); // ~1 input + 1 output
     let f1_output_value = funding_value_sat
         .checked_sub(fee_f1)
         .expect("funding not sufficient for fee");
@@ -189,7 +300,7 @@ fn main() -> anyhow::Result<()> {
     let signer_pkh = signer_addr
         .witness_program()
         .expect("addr")
-        .program() // 20 bytes = hash160(pubkey)
+        .program() // 20 bytes = hash160(pubkey)
         .to_owned();
     let script_code =
         ScriptBuf::new_p2pkh(&bitcoin::PubkeyHash::from_slice(&signer_pkh.as_bytes())?);
@@ -210,14 +321,18 @@ fn main() -> anyhow::Result<()> {
 
     // Serialize & save
     let tx_f1_hex = serialize_hex(&tx_f1);
-    fs::write(format!("{}/f1.tx", OUTPUT_DIR), &tx_f1_hex)?;
+    let f1_file_path = format!("{}/f1.tx", OUTPUT_DIR);
+    fs::write(&f1_file_path, &tx_f1_hex)?;
     let tx_f1_id = tx_f1.compute_txid();
-    println!("tx_f1 created  →  {}  (saved to f1.tx)", tx_f1_id);
+
+    if !args.json {
+        println!("tx_f1 created  →  {}  (saved to f1.tx)", tx_f1_id);
+    }
 
     // --------------------------------------------------------------------
-    // 5. Construct tx_f2  (spend F1 output → Operator)
+    // 5. Construct tx_f2  (spend F1 output → Operator)
     // --------------------------------------------------------------------
-    let fee_f2 = estimate_fee_vbytes(120, args.fee_rate); // 1 input P2WSH + 1 output
+    let fee_f2 = estimate_fee_vbytes(120, args.fee_rate); // 1 input P2WSH + 1 output
     let f2_output_value = f1_output_value
         .checked_sub(fee_f2)
         .expect("f1 output too small for f2 fee");
@@ -260,17 +375,52 @@ fn main() -> anyhow::Result<()> {
         Witness::from_slice(&[sig_f2_ser, flow_id_enc, x_enc, f1_lock.to_bytes()]);
 
     let tx_f2_hex = serialize_hex(&tx_f2);
-    fs::write(format!("{}/f2.tx", OUTPUT_DIR), &tx_f2_hex)?;
+    let f2_file_path = format!("{}/f2.tx", OUTPUT_DIR);
+    fs::write(&f2_file_path, &tx_f2_hex)?;
     let tx_f2_id = tx_f2.compute_txid();
-    println!("tx_f2 created  →  {}  (saved to f2.tx)", tx_f2_id);
 
-    println!(
-        "\n{}\n  1️⃣  broadcast f1.tx ({}).  Wait ≥1 confirmation.\n  2️⃣  broadcast f2.tx ({}).\n{}",
-        "Next steps:".bold().green(),
-        tx_f1_id,
-        tx_f2_id,
-        "---------------------------------------------".dimmed()
-    );
+    if !args.json {
+        println!("tx_f2 created  →  {}  (saved to f2.tx)", tx_f2_id);
+        println!(
+            "\n{}\n  1️⃣  broadcast f1.tx ({}).  Wait ≥1 confirmation.\n  2️⃣  broadcast f2.tx ({}).\n{}",
+            "Next steps:".bold().green(),
+            tx_f1_id,
+            tx_f2_id,
+            "---------------------------------------------".dimmed()
+        );
+    }
+
+    // Update transaction information for JSON output
+    demo_output.transactions = Some(TransactionInfo {
+        f1: TxInfo {
+            txid: tx_f1_id.to_string(),
+            file_path: f1_file_path,
+        },
+        f2: TxInfo {
+            txid: tx_f2_id.to_string(),
+            file_path: f2_file_path,
+        },
+        nonce,
+        flow_id,
+    });
+
+    // If JSON output is requested, print the full JSON structure
+    if args.json {
+        let json_output = serde_json::to_string_pretty(&demo_output)?;
+
+        // If a JSON output file is specified, write to it
+        if let Some(file_path) = &args.json_output_file {
+            fs::create_dir_all(
+                std::path::Path::new(file_path)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("./")),
+            )?;
+            fs::write(file_path, &json_output)?;
+        } else {
+            // Otherwise print to stdout
+            println!("{}", json_output);
+        }
+    }
 
     Ok(())
 }
@@ -283,7 +433,7 @@ fn main() -> anyhow::Result<()> {
 fn print_funding_instructions(addr: &Address) {
     let btc = REQUIRED_AMOUNT_SAT as f64 / 100_000_000.0;
     println!(
-        "\n{}\nSend ≈ {:.8} BTC ({} sat) to the demo address on Signet, then re‑run this command with --funding-txid <txid>.\n\nExample (bitcoin‑cli):\n  bitcoin-cli -signet sendtoaddress {} {:.8}\n",
+        "\n{}\nSend ≈ {:.8} BTC ({} sat) to the demo address on Signet, then re‑run this command with --funding-txid <txid>.\n\nExample (bitcoin‑cli):\n  bitcoin-cli -signet sendtoaddress {} {:.8}\n",
         "🔗  Funding required".bold().yellow(),
         btc,
         REQUIRED_AMOUNT_SAT,
