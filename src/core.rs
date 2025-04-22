@@ -1025,13 +1025,20 @@ mod debug_reconstruct {
             .push_opcode(opcodes::all::OP_GREATERTHAN)
             .push_opcode(opcodes::all::OP_VERIFY); // (stack empty)
 
-        // -- drop up to 104 residual items safely
-        for _ in 0..104 {
+        // Cleanup loop:
+        //   - always removes the depth word we just pushed
+        //   - removes one real stack item *only* when DEPTH > 0
+        //   - never leaves falsey `[]` leftovers.
+        // 128 iterations are plenty – > than any stack we create.
+        // TODO: investigate if we can have a more efficient way to do this
+        for _ in 0..128 {
+            // any upper bound ≥ max stack size
             b = b
                 .push_opcode(opcodes::all::OP_DEPTH)
                 .push_opcode(opcodes::all::OP_0NOTEQUAL) // depth != 0 ?
                 .push_opcode(opcodes::all::OP_IF)
-                .push_opcode(opcodes::all::OP_DROP)
+                .push_opcode(opcodes::all::OP_DROP) // drop depth word
+                .push_opcode(opcodes::all::OP_DROP) // drop one payload item
                 .push_opcode(opcodes::all::OP_ENDIF);
         }
 
