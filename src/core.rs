@@ -937,80 +937,95 @@ mod tests {
         //assert!(f1_res.success);
     }
 
+    /// Pushes the 12‑byte Blake3 message onto the stack (nibble–wise),
+    /// rebuilds `x` out of its **eight** most‑significant nibbles
+    /// and proves that `x == 0x12345678` and `x > 100`.
     #[test]
     fn test_reconstruct_x_from_nibbles() {
-        use bitcoin::opcodes;
-
-        // x = 0x12345678 (> 100)
-        let x: u32 = 0x12_34_56_78;
+        //------------------------------------------------------------------//
+        //  Parameters
+        //------------------------------------------------------------------//
+        let x: u32 = 0x12_34_56_78; // 305 419 896
         let nonce: u64 = 0x56_78_9a_bc_de_f0_21_43;
         let limb_len: u8 = 4;
 
-        // Message = x_le || nonce_le
-        let message = [
+        // message = 4‑byte x (LE)  +  8‑byte nonce (LE)
+        let message: Vec<u8> = [
             x.to_le_bytes(),
             nonce.to_le_bytes()[0..4].try_into().unwrap(),
             nonce.to_le_bytes()[4..8].try_into().unwrap(),
         ]
         .concat();
 
-        // Script that pushes all message nibbles onto stack (top = first nibble)
-        let msg_push = blake3_push_message_script_with_limb(&message, limb_len).compile();
+        //------------------------------------------------------------------//
+        //  1. Witness script – pushes every nibble of `message`
+        //------------------------------------------------------------------//
+        let witness = blake3_push_message_script_with_limb(&message, limb_len).compile();
 
-        // Build reconstruction script
+        //------------------------------------------------------------------//
+        //  2. Locking script – rebuild `x`
+        //------------------------------------------------------------------//
         let mut b = Builder::new();
 
-        // Accumulator starts at 0
-        b = b.push_int(0);
+        // acc := 0   (stored on alt‑stack)
+        b = b.push_int(0).push_opcode(opcodes::all::OP_TOALTSTACK);
 
-        // Helper to multiply top stack item by 16 (4 doublings)
-        let mul16 = |mut s: Builder| {
+        // Eight most‑significant nibbles of x are on the stack first
+        for _ in 0..8 {
+            // bring accumulator               stack: nib  |--> top
+            b = b.push_opcode(opcodes::all::OP_FROMALTSTACK); // nib acc
+
+            // acc *= 16    (four × “*2” ⇒ *16)
             for _ in 0..4 {
-                s = s
+                b = b
                     .push_opcode(opcodes::all::OP_DUP)
                     .push_opcode(opcodes::all::OP_ADD);
-            }
-            s
-        };
+            } // nib acc16
 
-        for _ in 0..8 {
-            // Always pick depth 1 because previous nibble was removed
-            b = b.push_int(1).push_opcode(opcodes::all::OP_PICK); // duplicate nibble
-            // save nibble to altstack
-            b = b.push_opcode(opcodes::all::OP_TOALTSTACK);
+            // acc = acc16 + nib
+            b = b.push_opcode(opcodes::all::OP_ADD); // acc'
 
-            // multiply accumulator (now 2nd item) by 16
-            b = mul16(b);
-
-            // restore nibble
-            b = b.push_opcode(opcodes::all::OP_FROMALTSTACK);
-            // add -> new accumulator
-            b = b.push_opcode(opcodes::all::OP_ADD);
+            // store acc' for next round
+            b = b.push_opcode(opcodes::all::OP_TOALTSTACK); // —
         }
 
-        // Verify reconstructed x matches original constant (for test) and >100
+        // pull reconstructed x back
+        b = b.push_opcode(opcodes::all::OP_FROMALTSTACK); // x
+
+        // keep a copy for the range check
+        b = b.push_opcode(opcodes::all::OP_DUP); // x x
+
+        // prove equality
         b = b
             .push_int(x as i64)
-            .push_opcode(opcodes::all::OP_EQUALVERIFY)
-            .push_opcode(opcodes::all::OP_DUP)
+            .push_opcode(opcodes::all::OP_EQUALVERIFY); // x
+
+        // prove x > 100
+        b = b
             .push_int(100)
             .push_opcode(opcodes::all::OP_GREATERTHAN)
-            .push_opcode(opcodes::all::OP_VERIFY)
-            .push_int(1);
+            .push_opcode(opcodes::all::OP_VERIFY);
 
-        let msg_push_only_res = execute_script_buf(ScriptBuf::from_bytes(msg_push.to_bytes()));
-        println!("msg_push_only_res: {:?}", msg_push_only_res);
+        // leave TRUE so script succeeds
+        b = b.push_int(1);
 
-        let reconstruct_script = b.into_script();
-        println!("Reconstruction script: {}", reconstruct_script);
-        // Combine
-        let mut full = msg_push.to_bytes();
-        full.extend(reconstruct_script.to_bytes());
-        let script = ScriptBuf::from_bytes(full);
+        let locking_script: ScriptBuf = b.into_script();
 
-        let res = execute_script_buf(script);
-        println!("Reconstruction result: {:?}", res);
-        assert!(res.success, "Reconstruction script failed");
+        //------------------------------------------------------------------//
+        //  3. Execute witness ⧺ locking script
+        //------------------------------------------------------------------//
+        let full_script = {
+            let mut bytes = witness.to_bytes();
+            bytes.extend(locking_script.to_bytes());
+            ScriptBuf::from_bytes(bytes)
+        };
+
+        let res = execute_script_buf(full_script);
+        assert!(
+            res.success,
+            "reconstruction failed — final stack: {:?}",
+            res.final_stack
+        );
     }
 
     pub fn create_dummy_sighash_message(seed_bytes: &[u8]) -> Message {
@@ -1018,5 +1033,221 @@ mod tests {
         engine.input(seed_bytes);
         let digest = sha256::Hash::from_engine(engine);
         Message::from_digest(digest.to_byte_array())
+    }
+}
+#[cfg(test)]
+mod debug_reconstruct {
+    use bitcoin::blockdata::script::{Builder, ScriptBuf};
+    use bitcoin::opcodes;
+    use bitvm::{execute_script_buf, hash::blake3::blake3_push_message_script_with_limb};
+
+    //------------------------------------------------------------//
+    // Constants & helpers
+    //------------------------------------------------------------//
+    const X_BE: u32 = 0x12_34_56_78;
+    const NONCE: u64 = 0x56_78_9a_bc_de_f0_21_43;
+    const LIMB: u8 = 4;
+
+    fn message() -> Vec<u8> {
+        [
+            X_BE.to_le_bytes(),
+            NONCE.to_le_bytes()[0..4].try_into().unwrap(),
+            NONCE.to_le_bytes()[4..8].try_into().unwrap(),
+        ]
+        .concat()
+    }
+
+    fn witness_script() -> ScriptBuf {
+        blake3_push_message_script_with_limb(&message(), LIMB)
+            .compile()
+            .into()
+    }
+
+    //------------------------------------------------------------//
+    // dbg_01 ─ witness only
+    //------------------------------------------------------------//
+    #[test]
+    fn dbg_01_push_only() {
+        let info = execute_script_buf(witness_script());
+        println!("\n===== dbg_01_push_only =====");
+        println!("{:#?}", info);
+        assert!(true);
+    }
+
+    //------------------------------------------------------------//
+    // dbg_02 ─ one accumulator round, no depth gymnastics
+    //------------------------------------------------------------//
+    #[test]
+    fn dbg_02_loop_only() {
+        let w = witness_script();
+
+        // Locking script: take one nibble (top‑of‑stack),
+        //   acc := acc*16 + nibble, store to alt‑stack, push TRUE
+        let mut b = Builder::new()
+            .push_int(0) // acc = 0
+            .push_opcode(opcodes::all::OP_TOALTSTACK)
+            // === 1st (and only) nibble ================================= //
+            .push_opcode(opcodes::all::OP_FROMALTSTACK) // nib  acc
+            // acc *= 16
+            .push_opcode(opcodes::all::OP_DUP)
+            .push_opcode(opcodes::all::OP_ADD) // *2
+            .push_opcode(opcodes::all::OP_DUP)
+            .push_opcode(opcodes::all::OP_ADD) // *4
+            .push_opcode(opcodes::all::OP_DUP)
+            .push_opcode(opcodes::all::OP_ADD) // *8
+            .push_opcode(opcodes::all::OP_DUP)
+            .push_opcode(opcodes::all::OP_ADD) // *16
+            // acc += nib
+            .push_opcode(opcodes::all::OP_ADD)
+            .push_opcode(opcodes::all::OP_TOALTSTACK)
+            // =========================================================== //
+            // show result
+            .push_opcode(opcodes::all::OP_FROMALTSTACK)
+            .push_int(1);
+
+        let info = execute_script_buf(ScriptBuf::from_bytes(
+            [w.to_bytes(), b.into_script().to_bytes()].concat(),
+        ));
+        println!("\n===== dbg_02_loop_only =====");
+        println!("{:#?}", info);
+        assert!(true);
+    }
+
+    //------------------------------------------------------------//
+    // dbg_03 ─ full 8‑round loop, leave <acc TRUE> on main stack
+    //------------------------------------------------------------//
+    #[test]
+    fn dbg_03_acc_value() {
+        let w = witness_script();
+        let mut b = Builder::new()
+            .push_int(0)
+            .push_opcode(opcodes::all::OP_TOALTSTACK);
+
+        // --------- eight rounds (bottom nibble first!) --------------- //
+        // We *think* bottom‑of‑stack is depth = (OP_DEPTH - 1)
+        //   so each round:
+        //      depth := OP_DEPTH 1SUB
+        //      ROLL   (puts bottom nib on top & removes it)
+        //   then the standard acc := acc*16 + nib
+        for _ in 0..8 {
+            // depth = OP_DEPTH - 1
+            b = b
+                .push_opcode(opcodes::all::OP_DEPTH)
+                .push_opcode(opcodes::all::OP_1SUB)
+                .push_opcode(opcodes::all::OP_ROLL); // nib
+
+            b = b.push_opcode(opcodes::all::OP_FROMALTSTACK); // nib acc
+
+            // acc *= 16
+            for _ in 0..4 {
+                b = b
+                    .push_opcode(opcodes::all::OP_DUP)
+                    .push_opcode(opcodes::all::OP_ADD);
+            }
+            // acc += nib
+            b = b
+                .push_opcode(opcodes::all::OP_ADD)
+                .push_opcode(opcodes::all::OP_TOALTSTACK);
+        }
+        // pull acc (= reconstructed x) back & push TRUE
+        b = b.push_opcode(opcodes::all::OP_FROMALTSTACK).push_int(1);
+
+        let info = execute_script_buf(ScriptBuf::from_bytes(
+            [w.to_bytes(), b.into_script().to_bytes()].concat(),
+        ));
+        println!("\n===== dbg_03_acc_value =====");
+        println!("{:#?}", info);
+        assert!(true);
+    }
+
+    // ------------------------------------------------------------ //
+    //  The test
+    // ------------------------------------------------------------ //
+    #[test]
+    fn dbg_reconstruct_x_and_verify() {
+        // 1) witness pushes every nibble of the 12‑byte message
+        let witness: ScriptBuf = blake3_push_message_script_with_limb(&message(), LIMB)
+            .compile()
+            .into();
+
+        // 2) locking script
+        let mut b = Builder::new();
+
+        // -- initialise accumulator
+        b = b.push_int(0).push_opcode(opcodes::all::OP_TOALTSTACK);
+
+        // -- eight rounds: build x from bottom up
+        for _ in 0..8 {
+            b = b
+                .push_opcode(opcodes::all::OP_DEPTH)
+                .push_opcode(opcodes::all::OP_1SUB)
+                .push_opcode(opcodes::all::OP_ROLL) // nib
+                .push_opcode(opcodes::all::OP_FROMALTSTACK); // nib acc
+
+            // acc *= 16
+            for _ in 0..4 {
+                b = b
+                    .push_opcode(opcodes::all::OP_DUP)
+                    .push_opcode(opcodes::all::OP_ADD);
+            }
+            // acc += nib
+            b = b
+                .push_opcode(opcodes::all::OP_ADD)
+                .push_opcode(opcodes::all::OP_TOALTSTACK);
+        }
+
+        // -- drop the 16 nonce nibbles
+        for _ in 0..16 {
+            b = b
+                .push_opcode(opcodes::all::OP_DEPTH)
+                .push_opcode(opcodes::all::OP_1SUB)
+                .push_opcode(opcodes::all::OP_ROLL)
+                .push_opcode(opcodes::all::OP_DROP);
+        }
+
+        // -- pull x back, run equality & range checks
+        b = b
+            .push_opcode(opcodes::all::OP_FROMALTSTACK) // x
+            .push_opcode(opcodes::all::OP_DUP) // x x
+            .push_int(X_BE as i64)
+            .push_opcode(opcodes::all::OP_EQUALVERIFY) // x
+            .push_int(100)
+            .push_opcode(opcodes::all::OP_GREATERTHAN)
+            .push_opcode(opcodes::all::OP_VERIFY); // (stack empty)
+
+        // -- push TRUE, send to alt‑stack
+        b = b.push_int(1).push_opcode(opcodes::all::OP_TOALTSTACK);
+
+        // -- drop up to 32 residual items safely
+        for _ in 0..32 {
+            b = b
+                .push_opcode(opcodes::all::OP_DEPTH)
+                .push_opcode(opcodes::all::OP_0NOTEQUAL) // depth != 0 ?
+                .push_opcode(opcodes::all::OP_IF)
+                .push_opcode(opcodes::all::OP_DROP)
+                .push_opcode(opcodes::all::OP_ENDIF);
+        }
+
+        // -- bring TRUE back
+        b = b.push_opcode(opcodes::all::OP_FROMALTSTACK);
+
+        let locking: ScriptBuf = b.into_script();
+
+        // 3) execute
+        let full_script = {
+            let mut bytes = witness.to_bytes();
+            bytes.extend(locking.to_bytes());
+            ScriptBuf::from_bytes(bytes)
+        };
+
+        let info = execute_script_buf(full_script);
+        println!("\n===== dbg_reconstruct_x_and_verify =====");
+        println!("{:#?}", info);
+
+        assert!(
+            info.success,
+            "Script failed – final stack: {:?}",
+            info.final_stack
+        );
     }
 }
