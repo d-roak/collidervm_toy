@@ -520,9 +520,37 @@ mod tests {
     use secp256k1::Secp256k1;
 
     #[test]
+    fn test_f1_witness_script() {
+        // Create an input value that will fill the 4 bytes
+        let input_value = u32::from_be_bytes([0x12, 0x34, 0x56, 0x78]);
+        let nonce = u64::from_be_bytes([0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x21, 0x43]);
+        let limb_len: u8 = 4;
+
+        let message = [
+            input_value.to_le_bytes(),
+            nonce.to_le_bytes()[0..4].try_into().unwrap(),
+            nonce.to_le_bytes()[4..8].try_into().unwrap(),
+        ]
+        .concat();
+        println!("input_value: {}", input_value);
+        println!("nonce: {}", nonce);
+        println!("message: {}", hex::encode(message.clone()));
+        let msg_push_script_f1 = blake3_push_message_script_with_limb(&message, limb_len).compile();
+        //println!("msg_push_script_f1: {}", msg_push_script_f1);
+
+        let witness_script = ScriptBuf::from_bytes(msg_push_script_f1.to_bytes());
+        let f1_res = execute_script_buf(witness_script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+    }
+
+    #[test]
     fn test_blake3_script_generation() {
         let message = [0u8; 32];
-        let limb_len = 4;
+        let limb_len: u8 = 4;
         let expected_hash = *blake3::hash(message.as_ref()).as_bytes();
 
         println!("Expected hash: {}", hex::encode(expected_hash));
@@ -908,6 +936,83 @@ mod tests {
         println!("F1 => last_opcode={:?}", f1_res.last_opcode);
         //assert!(f1_res.success);
     }
+
+    #[test]
+    fn test_reconstruct_x_from_nibbles() {
+        use bitcoin::opcodes;
+
+        // x = 0x12345678 (> 100)
+        let x: u32 = 0x12_34_56_78;
+        let nonce: u64 = 0x56_78_9a_bc_de_f0_21_43;
+        let limb_len: u8 = 4;
+
+        // Message = x_le || nonce_le
+        let message = [
+            x.to_le_bytes(),
+            nonce.to_le_bytes()[0..4].try_into().unwrap(),
+            nonce.to_le_bytes()[4..8].try_into().unwrap(),
+        ]
+        .concat();
+
+        // Script that pushes all message nibbles onto stack (top = first nibble)
+        let msg_push = blake3_push_message_script_with_limb(&message, limb_len).compile();
+
+        // Build reconstruction script
+        let mut b = Builder::new();
+
+        // Accumulator starts at 0
+        b = b.push_int(0);
+
+        // Helper to multiply top stack item by 16 (4 doublings)
+        let mul16 = |mut s: Builder| {
+            for _ in 0..4 {
+                s = s
+                    .push_opcode(opcodes::all::OP_DUP)
+                    .push_opcode(opcodes::all::OP_ADD);
+            }
+            s
+        };
+
+        for _ in 0..8 {
+            // Always pick depth 1 because previous nibble was removed
+            b = b.push_int(1).push_opcode(opcodes::all::OP_PICK); // duplicate nibble
+            // save nibble to altstack
+            b = b.push_opcode(opcodes::all::OP_TOALTSTACK);
+
+            // multiply accumulator (now 2nd item) by 16
+            b = mul16(b);
+
+            // restore nibble
+            b = b.push_opcode(opcodes::all::OP_FROMALTSTACK);
+            // add -> new accumulator
+            b = b.push_opcode(opcodes::all::OP_ADD);
+        }
+
+        // Verify reconstructed x matches original constant (for test) and >100
+        b = b
+            .push_int(x as i64)
+            .push_opcode(opcodes::all::OP_EQUALVERIFY)
+            .push_opcode(opcodes::all::OP_DUP)
+            .push_int(100)
+            .push_opcode(opcodes::all::OP_GREATERTHAN)
+            .push_opcode(opcodes::all::OP_VERIFY)
+            .push_int(1);
+
+        let msg_push_only_res = execute_script_buf(ScriptBuf::from_bytes(msg_push.to_bytes()));
+        println!("msg_push_only_res: {:?}", msg_push_only_res);
+
+        let reconstruct_script = b.into_script();
+        println!("Reconstruction script: {}", reconstruct_script);
+        // Combine
+        let mut full = msg_push.to_bytes();
+        full.extend(reconstruct_script.to_bytes());
+        let script = ScriptBuf::from_bytes(full);
+
+        let res = execute_script_buf(script);
+        println!("Reconstruction result: {:?}", res);
+        assert!(res.success, "Reconstruction script failed");
+    }
+
     pub fn create_dummy_sighash_message(seed_bytes: &[u8]) -> Message {
         let mut engine = sha256::HashEngine::default();
         engine.input(seed_bytes);
