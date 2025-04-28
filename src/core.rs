@@ -698,7 +698,7 @@ mod tests {
         full_f1.extend(test_case.sig_script_f1.to_bytes());
         full_f1.extend(debug_script.to_bytes());
         let exec_f1_script = ScriptBuf::from_bytes(full_f1);
-        return exec_f1_script;
+        exec_f1_script
     }
 
     #[test]
