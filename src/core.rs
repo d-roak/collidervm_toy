@@ -677,7 +677,6 @@ mod tests {
     /// duplicates (keeps) the first 8 nibbles, accumulates them into `x`,
     /// leaves `x` on the *altstack*, original 24 nibbles untouched.
     fn script_reconstruct_x_from_first_8_nibbles() -> ScriptBuf {
-        const TOTAL_NIBBLES: i64 = 24; // 12 bytes ×2
         let mut b = Builder::new()
             .push_int(0) // acc = 0
             .push_opcode(opcodes::all::OP_TOALTSTACK);
