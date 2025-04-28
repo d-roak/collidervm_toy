@@ -581,9 +581,32 @@ mod tests {
     }
 
     #[test]
-    fn test_f1_e2e() {
+    fn test_f1_e2e_with_valid_input() {
         let test_case = create_test_case(16, 4, 123);
+        let script = test_f1_e2e(&test_case);
+        let f1_res = execute_script_buf(script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+        assert!(f1_res.success);
+    }
 
+    #[test]
+    fn test_f1_e2e_with_invalid_input() {
+        let test_case = create_test_case(16, 4, 100);
+        let script = test_f1_e2e(&test_case);
+        let f1_res = execute_script_buf(script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+        assert!(!f1_res.success);
+    }
+
+    fn test_f1_e2e(test_case: &ColliderVmTestCase) -> ScriptBuf {
         // ******************************************************
         // CONSTRUCT A DEBUGGING SCRIPT
         // ******************************************************
@@ -648,14 +671,7 @@ mod tests {
         full_f1.extend(test_case.sig_script_f1.to_bytes());
         full_f1.extend(debug_script.to_bytes());
         let exec_f1_script = ScriptBuf::from_bytes(full_f1);
-
-        let f1_res = execute_script_buf(exec_f1_script);
-        println!("F1 => success={}", f1_res.success);
-        println!("F1 => exec_stats={:?}", f1_res.stats);
-        println!("F1 => final_stack={:?}", f1_res.final_stack);
-        println!("F1 => error={:?}", f1_res.error);
-        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
-        assert!(f1_res.success);
+        return exec_f1_script;
     }
 
     /// duplicates (keeps) the first 8 nibbles, accumulates them into `x`,
