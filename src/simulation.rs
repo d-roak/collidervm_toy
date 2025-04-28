@@ -358,15 +358,14 @@ pub fn online_execution(
         flow_id
     );
     thread::sleep(Duration::from_millis(300));
-    let x_sig_script_f1 = {
+    let sig_script_f1 = {
         let mut b = Builder::new();
-        b = b.push_int(input_value as i64);
         b = b.push_slice(sig_f1_buf);
         b.into_script()
     };
 
     let mut full_f1 = msg_push_script_f1.to_bytes();
-    full_f1.extend(x_sig_script_f1.to_bytes());
+    full_f1.extend(sig_script_f1.to_bytes());
     full_f1.extend(step_f1.locking_script.to_bytes());
     let exec_f1_script = ScriptBuf::from_bytes(full_f1);
 
