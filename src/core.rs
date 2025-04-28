@@ -592,13 +592,13 @@ mod tests {
         let limb_len = 4;
 
         // 0)  signature
-        let sig_check = Builder::new()
+        let signature_check = Builder::new()
             .push_key(&test_case.signer_pubkey)
             .push_opcode(opcodes::all::OP_CHECKSIGVERIFY)
             .into_script();
 
         // 1)  reconstruct x  (keeps message)
-        let recon_x = script_reconstruct_x_from_first_8_nibbles();
+        let reconstruct_x = script_reconstruct_x_from_first_8_nibbles();
 
         // 2)  x > 100 (non-destructive)
         let x_test = Builder::new()
@@ -611,34 +611,33 @@ mod tests {
             .into_script();
 
         // 3)  BLAKE-3(message)
-        let compute = {
+        let compute_blake3 = {
             let compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
             let optim = optimizer::optimize(compiled);
             ScriptBuf::from_bytes(optim.to_bytes())
         };
 
         // 4)  drop the 64-needed-nibbles minus prefix_len
-        let mut drop = Builder::new();
-        for _ in 0..(64 - test_case.flow_id_prefix.len()) {
-            drop = drop.push_opcode(opcodes::all::OP_DROP);
-        }
-        let drop_excess = drop.into_script();
+        let drop_excess = {
+            let mut b = Builder::new();
+            for _ in 0..(64 - test_case.flow_id_prefix.len()) {
+                b = b.push_opcode(opcodes::all::OP_DROP);
+            }
+            b.into_script()
+        };
 
         // 5)  compare prefix & succeed
         let prefix_cmp = build_prefix_equalverify(&test_case.flow_id_prefix);
         let success = Builder::new().push_opcode(OP_TRUE).into_script();
 
         let debug_script = combine_scripts(&[
-            sig_check,
-            recon_x,
-            Builder::new()
-                .push_opcode(opcodes::all::OP_FROMALTSTACK)
-                .into_script(),
-            //compute,
-            //x_test,
-            //drop_excess,
-            //prefix_cmp,
-            //success,
+            signature_check,
+            reconstruct_x,
+            x_test,
+            compute_blake3,
+            drop_excess,
+            prefix_cmp,
+            success,
         ]);
 
         // ******************************************************
@@ -647,7 +646,6 @@ mod tests {
         let mut full_f1 = Vec::new();
         full_f1.extend(test_case.msg_push_script_f1.to_bytes());
         full_f1.extend(test_case.sig_script_f1.to_bytes());
-        //full_f1.extend(test_case.f1_script.to_bytes());
         full_f1.extend(debug_script.to_bytes());
         let exec_f1_script = ScriptBuf::from_bytes(full_f1);
 
@@ -657,6 +655,7 @@ mod tests {
         println!("F1 => final_stack={:?}", f1_res.final_stack);
         println!("F1 => error={:?}", f1_res.error);
         println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+        assert!(f1_res.success);
     }
 
     /// duplicates (keeps) the first 8 nibbles, accumulates them into `x`,
@@ -668,10 +667,12 @@ mod tests {
             .push_opcode(opcodes::all::OP_TOALTSTACK);
 
         for i in 0..8 {
-            let idx = TOTAL_NIBBLES - 1 - i; // 23,22,…,16
             b = b
-                .push_int(idx) // depth index
-                .push_opcode(opcodes::all::OP_PICK) // copy nib
+                .push_opcode(opcodes::all::OP_DEPTH)
+                .push_opcode(opcodes::all::OP_1SUB)
+                .push_int(i as i64)
+                .push_opcode(opcodes::all::OP_SUB)
+                .push_opcode(opcodes::all::OP_PICK)
                 .push_opcode(opcodes::all::OP_FROMALTSTACK); // nib acc
 
             // acc *= 16
