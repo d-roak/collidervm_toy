@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn test_f1_e2e_with_valid_input() {
         let test_case = create_test_case(16, 4, 123);
-        let script = test_f1_e2e(&test_case);
+        let script = build_f1_e2e_script(&test_case);
         let f1_res = execute_script_buf(script);
         println!("F1 => success={}", f1_res.success);
         println!("F1 => exec_stats={:?}", f1_res.stats);
@@ -596,7 +596,7 @@ mod tests {
     #[test]
     fn test_f1_e2e_with_invalid_input() {
         let test_case = create_test_case(16, 4, 100);
-        let script = test_f1_e2e(&test_case);
+        let script = build_f1_e2e_script(&test_case);
         let f1_res = execute_script_buf(script);
         println!("F1 => success={}", f1_res.success);
         println!("F1 => exec_stats={:?}", f1_res.stats);
@@ -606,7 +606,7 @@ mod tests {
         assert!(!f1_res.success);
     }
 
-    fn test_f1_e2e(test_case: &ColliderVmTestCase) -> ScriptBuf {
+    fn build_f1_e2e_script(test_case: &ColliderVmTestCase) -> ScriptBuf {
         // ******************************************************
         // CONSTRUCT A DEBUGGING SCRIPT
         // ******************************************************
