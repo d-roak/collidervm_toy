@@ -342,6 +342,38 @@ fn build_prefix_equalverify(prefix_data: &[u8]) -> ScriptBuf {
     b.into_script()
 }
 
+/// duplicates (keeps) the first 8 nibbles, accumulates them into `x`,
+/// leaves `x` on the *altstack*, original 24 nibbles untouched.
+fn build_script_reconstruct_x() -> ScriptBuf {
+    let mut b = Builder::new()
+        .push_int(0) // acc = 0
+        .push_opcode(opcodes::all::OP_TOALTSTACK);
+
+    for i in 0..8 {
+        b = b
+            .push_opcode(opcodes::all::OP_DEPTH)
+            .push_opcode(opcodes::all::OP_1SUB)
+            .push_int(i as i64)
+            .push_opcode(opcodes::all::OP_SUB)
+            .push_opcode(opcodes::all::OP_PICK)
+            .push_opcode(opcodes::all::OP_FROMALTSTACK); // nib acc
+
+        // acc *= 16
+        for _ in 0..4 {
+            b = b
+                .push_opcode(opcodes::all::OP_DUP)
+                .push_opcode(opcodes::all::OP_ADD);
+        }
+        // acc += nib
+        b = b
+            .push_opcode(opcodes::all::OP_SWAP) // acc nib  → nib acc
+            .push_opcode(opcodes::all::OP_ADD) // consume nib copy
+            .push_opcode(opcodes::all::OP_TOALTSTACK); // store new acc
+    }
+    // leave the finished x on altstack
+    b.into_script()
+}
+
 /// Build an F1 script with onchain BLAKE3, checking x>F1_THRESHOLD and the top (b_bits/8) bytes match flow_id_prefix.
 /// For now we cheat and use the provided input and nonce to construct the message for the BLAKE3 hash.
 /// TODO: Reconstruct the message from the witness elements.
@@ -355,30 +387,27 @@ pub fn build_script_f1_blake3_locked(
     let limb_len = 4;
 
     // 1) Script to check signature
-    let sig_check = {
+    let verify_signature_script = {
         let mut b = Builder::new();
         b = b.push_key(signer_pubkey);
         b.push_opcode(opcodes::all::OP_CHECKSIGVERIFY).into_script()
     };
 
-    // 2) Bring x_num to top, check x_num > 100
-    let x_greater_check = Builder::new()
-        .push_opcode(opcodes::all::OP_DUP)
+    // 2) Reconstruct x from first 8 nibbles
+    let reconstruct_x_script = build_script_reconstruct_x();
+
+    // 3) Check x_num > 100
+    let x_greater_check_script = Builder::new()
+        .push_opcode(opcodes::all::OP_FROMALTSTACK)
         .push_int(F1_THRESHOLD as i64)
         .push_opcode(opcodes::all::OP_GREATERTHAN)
         .push_opcode(opcodes::all::OP_VERIFY)
         .into_script();
 
-    // 3) Drop x_num and reorder for BLAKE3
-    let reorder_for_blake = Builder::new()
-        .push_opcode(opcodes::all::OP_DROP)
-        .into_script();
-
     // 4) BLAKE3 compute snippet - OPTIMIZED
-    // TODO: Reconstruct the message from the witness elements.
     let compute_compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
     let compute_optimized = optimizer::optimize(compute_compiled);
-    let compute_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
+    let compute_blake3_script = ScriptBuf::from_bytes(compute_optimized.to_bytes());
 
     // 5) drop limbs we don't need for prefix check
     // Needed nibbles: prefix_len (because now represented as nibbles) or B / 4
@@ -394,19 +423,19 @@ pub fn build_script_f1_blake3_locked(
     };
 
     // 6) compare prefix => OP_EQUALVERIFY
-    let prefix_script = build_prefix_equalverify(flow_id_prefix);
+    let prefix_cmp_script = build_prefix_equalverify(flow_id_prefix);
 
     // 7) push OP_TRUE
     let success_script = Builder::new().push_opcode(OP_TRUE).into_script();
 
     // Combine the locking script parts
     combine_scripts(&[
-        sig_check,
-        x_greater_check,
-        reorder_for_blake,
-        compute_script,
+        verify_signature_script,
+        reconstruct_x_script,
+        x_greater_check_script,
+        compute_blake3_script,
         drop_script,
-        prefix_script,
+        prefix_cmp_script,
         success_script,
     ])
 }
@@ -581,9 +610,32 @@ mod tests {
     }
 
     #[test]
-    fn test_f1_e2e() {
+    fn test_f1_e2e_with_valid_input() {
         let test_case = create_test_case(16, 4, 123);
+        let script = build_f1_e2e_script(&test_case);
+        let f1_res = execute_script_buf(script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+        assert!(f1_res.success);
+    }
 
+    #[test]
+    fn test_f1_e2e_with_invalid_input() {
+        let test_case = create_test_case(16, 4, 100);
+        let script = build_f1_e2e_script(&test_case);
+        let f1_res = execute_script_buf(script);
+        println!("F1 => success={}", f1_res.success);
+        println!("F1 => exec_stats={:?}", f1_res.stats);
+        println!("F1 => final_stack={:?}", f1_res.final_stack);
+        println!("F1 => error={:?}", f1_res.error);
+        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
+        assert!(!f1_res.success);
+    }
+
+    fn build_f1_e2e_script(test_case: &ColliderVmTestCase) -> ScriptBuf {
         // ******************************************************
         // CONSTRUCT A DEBUGGING SCRIPT
         // ******************************************************
@@ -592,53 +644,50 @@ mod tests {
         let limb_len = 4;
 
         // 0)  signature
-        let sig_check = Builder::new()
+        let signature_check = Builder::new()
             .push_key(&test_case.signer_pubkey)
             .push_opcode(opcodes::all::OP_CHECKSIGVERIFY)
             .into_script();
 
         // 1)  reconstruct x  (keeps message)
-        let recon_x = script_reconstruct_x_from_first_8_nibbles();
+        let reconstruct_x = build_script_reconstruct_x();
 
         // 2)  x > 100 (non-destructive)
         let x_test = Builder::new()
             .push_opcode(opcodes::all::OP_FROMALTSTACK)
-            .push_opcode(opcodes::all::OP_DUP)
             .push_int(F1_THRESHOLD as i64)
             .push_opcode(opcodes::all::OP_GREATERTHAN)
             .push_opcode(opcodes::all::OP_VERIFY)
-            .push_opcode(opcodes::all::OP_TOALTSTACK)
             .into_script();
 
         // 3)  BLAKE-3(message)
-        let compute = {
+        let compute_blake3 = {
             let compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
             let optim = optimizer::optimize(compiled);
             ScriptBuf::from_bytes(optim.to_bytes())
         };
 
         // 4)  drop the 64-needed-nibbles minus prefix_len
-        let mut drop = Builder::new();
-        for _ in 0..(64 - test_case.flow_id_prefix.len()) {
-            drop = drop.push_opcode(opcodes::all::OP_DROP);
-        }
-        let drop_excess = drop.into_script();
+        let drop_excess = {
+            let mut b = Builder::new();
+            for _ in 0..(64 - test_case.flow_id_prefix.len()) {
+                b = b.push_opcode(opcodes::all::OP_DROP);
+            }
+            b.into_script()
+        };
 
         // 5)  compare prefix & succeed
         let prefix_cmp = build_prefix_equalverify(&test_case.flow_id_prefix);
         let success = Builder::new().push_opcode(OP_TRUE).into_script();
 
         let debug_script = combine_scripts(&[
-            sig_check,
-            recon_x,
-            Builder::new()
-                .push_opcode(opcodes::all::OP_FROMALTSTACK)
-                .into_script(),
-            //compute,
-            //x_test,
-            //drop_excess,
-            //prefix_cmp,
-            //success,
+            signature_check,
+            reconstruct_x,
+            x_test,
+            compute_blake3,
+            drop_excess,
+            prefix_cmp,
+            success,
         ]);
 
         // ******************************************************
@@ -647,47 +696,9 @@ mod tests {
         let mut full_f1 = Vec::new();
         full_f1.extend(test_case.msg_push_script_f1.to_bytes());
         full_f1.extend(test_case.sig_script_f1.to_bytes());
-        //full_f1.extend(test_case.f1_script.to_bytes());
         full_f1.extend(debug_script.to_bytes());
         let exec_f1_script = ScriptBuf::from_bytes(full_f1);
-
-        let f1_res = execute_script_buf(exec_f1_script);
-        println!("F1 => success={}", f1_res.success);
-        println!("F1 => exec_stats={:?}", f1_res.stats);
-        println!("F1 => final_stack={:?}", f1_res.final_stack);
-        println!("F1 => error={:?}", f1_res.error);
-        println!("F1 => last_opcode={:?}", f1_res.last_opcode);
-    }
-
-    /// duplicates (keeps) the first 8 nibbles, accumulates them into `x`,
-    /// leaves `x` on the *altstack*, original 24 nibbles untouched.
-    fn script_reconstruct_x_from_first_8_nibbles() -> ScriptBuf {
-        const TOTAL_NIBBLES: i64 = 24; // 12 bytes ×2
-        let mut b = Builder::new()
-            .push_int(0) // acc = 0
-            .push_opcode(opcodes::all::OP_TOALTSTACK);
-
-        for i in 0..8 {
-            let idx = TOTAL_NIBBLES - 1 - i; // 23,22,…,16
-            b = b
-                .push_int(idx) // depth index
-                .push_opcode(opcodes::all::OP_PICK) // copy nib
-                .push_opcode(opcodes::all::OP_FROMALTSTACK); // nib acc
-
-            // acc *= 16
-            for _ in 0..4 {
-                b = b
-                    .push_opcode(opcodes::all::OP_DUP)
-                    .push_opcode(opcodes::all::OP_ADD);
-            }
-            // acc += nib
-            b = b
-                .push_opcode(opcodes::all::OP_SWAP) // acc nib  → nib acc
-                .push_opcode(opcodes::all::OP_ADD) // consume nib copy
-                .push_opcode(opcodes::all::OP_TOALTSTACK); // store new acc
-        }
-        // leave the finished x on altstack
-        b.into_script()
+        exec_f1_script
     }
 
     #[test]
