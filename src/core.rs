@@ -104,8 +104,7 @@ pub fn calculate_flow_id(
         Ok((prefix_b, hash.as_bytes()[0..32].try_into().unwrap()))
     } else {
         Err(format!(
-            "Hash prefix {} (from H={}) >= {} (out of range)",
-            prefix_b, hash, max_flow_id
+            "Hash prefix {prefix_b} (from H={hash}) >= {max_flow_id} (out of range)"
         ))
     }
 }
@@ -196,7 +195,7 @@ pub fn find_valid_nonce(
                     nonce as f64 // avoid division by zero
                 };
 
-                println!("  Average hash rate: {:.2} hashes/sec", hash_rate);
+                println!("  Average hash rate: {hash_rate:.2} hashes/sec");
 
                 return Ok((nonce, flow_id, hash));
             }
@@ -231,7 +230,7 @@ pub fn find_valid_nonce(
                         };
 
                         let eta_str = if eta_secs < 60.0 {
-                            format!("{:.1}s", eta_secs)
+                            format!("{eta_secs:.1}s")
                         } else if eta_secs < 3600.0 {
                             format!("{:.1}m {:.0}s", eta_secs / 60.0, eta_secs % 60.0)
                         } else {
@@ -249,7 +248,7 @@ pub fn find_valid_nonce(
                             (nonce as f64 / expected_attempts as f64) * 100.0
                         ));
                     } else {
-                        println!("  Tried {} hashes... ({:.2} hash/s)", nonce, avg_hash_rate);
+                        println!("  Tried {nonce} hashes... ({avg_hash_rate:.2} hash/s)");
                     }
 
                     last_update = nonce;
@@ -283,8 +282,7 @@ pub fn find_valid_nonce(
                         pb.finish_with_message("Exceeded maximum attempts");
                     }
                     return Err(format!(
-                        "Could not find a valid nonce after {} attempts (expected ~{})",
-                        nonce, expected_attempts
+                        "Could not find a valid nonce after {nonce} attempts (expected ~{expected_attempts})"
                     ));
                 }
             }
@@ -477,7 +475,7 @@ pub fn build_script_f2_blake3_locked(
 
 /// A basic "hash rate" calibration
 pub fn benchmark_hash_rate(duration_secs: u64) -> u64 {
-    println!("Calibrating for {} seconds...", duration_secs);
+    println!("Calibrating for {duration_secs} seconds...");
     let pb = ProgressBar::new(100);
     pb.set_style(
         ProgressStyle::default_bar()
@@ -504,7 +502,7 @@ pub fn benchmark_hash_rate(duration_secs: u64) -> u64 {
 
     let dt = start.elapsed().as_secs_f64();
     let rate = if dt > 0.0 { count as f64 / dt } else { 0.0 };
-    pb.finish_with_message(format!("~{:.2} H/s", rate));
+    pb.finish_with_message(format!("~{rate:.2} H/s"));
     rate as u64
 }
 
@@ -519,16 +517,17 @@ mod tests {
     };
     use secp256k1::Secp256k1;
 
+    // commented fields are never read
     pub struct ColliderVmTestCase {
-        pub b: usize,
-        pub l: usize,
-        pub input_value: u32,
+        // pub b: usize,
+        // pub l: usize,
+        // pub input_value: u32,
         pub signer_pubkey: PublicKey,
-        pub signer_keypair: Keypair,
+        // pub signer_keypair: Keypair,
         pub flow_id_prefix: Vec<u8>,
-        pub sig_f1: Signature,
-        pub f1_script: ScriptBuf,
-        pub message: Vec<u8>,
+        // pub sig_f1: Signature,
+        // pub f1_script: ScriptBuf,
+        // pub message: Vec<u8>,
         pub msg_push_script_f1: ScriptBuf,
         pub sig_script_f1: ScriptBuf,
     }
@@ -545,7 +544,7 @@ mod tests {
         let sighash_f1 = create_dummy_sighash_message(&flow_id_prefix.clone());
         let sig_f1 = secp.sign_schnorr(&sighash_f1, &signer_keypair);
 
-        let f1_script = build_script_f1_blake3_locked(&signer_pubkey, &flow_id_prefix, b);
+        // let f1_script = build_script_f1_blake3_locked(&signer_pubkey, &flow_id_prefix, b);
 
         let message = [
             input_value.to_le_bytes(),
@@ -566,15 +565,15 @@ mod tests {
         };
 
         ColliderVmTestCase {
-            b,
-            l,
-            input_value,
+            // b,
+            // l,
+            // input_value,
             signer_pubkey,
-            signer_keypair,
+            // signer_keypair,
             flow_id_prefix,
-            sig_f1,
-            f1_script,
-            message,
+            // sig_f1,
+            // f1_script,
+            // message,
             msg_push_script_f1,
             sig_script_f1,
         }
@@ -601,7 +600,7 @@ mod tests {
         let recon_x = script_reconstruct_x_from_first_8_nibbles();
 
         // 2)  x > 100 (non-destructive)
-        let x_test = Builder::new()
+        Builder::new()
             .push_opcode(opcodes::all::OP_FROMALTSTACK)
             .push_opcode(opcodes::all::OP_DUP)
             .push_int(F1_THRESHOLD as i64)
@@ -611,7 +610,7 @@ mod tests {
             .into_script();
 
         // 3)  BLAKE-3(message)
-        let compute = {
+        {
             let compiled = blake3_compute_script_with_limb(total_msg_len, limb_len).compile();
             let optim = optimizer::optimize(compiled);
             ScriptBuf::from_bytes(optim.to_bytes())
@@ -622,11 +621,11 @@ mod tests {
         for _ in 0..(64 - test_case.flow_id_prefix.len()) {
             drop = drop.push_opcode(opcodes::all::OP_DROP);
         }
-        let drop_excess = drop.into_script();
+        drop.into_script();
 
         // 5)  compare prefix & succeed
-        let prefix_cmp = build_prefix_equalverify(&test_case.flow_id_prefix);
-        let success = Builder::new().push_opcode(OP_TRUE).into_script();
+        build_prefix_equalverify(&test_case.flow_id_prefix);
+        Builder::new().push_opcode(OP_TRUE).into_script();
 
         let debug_script = combine_scripts(&[
             sig_check,
@@ -703,8 +702,8 @@ mod tests {
             nonce.to_le_bytes()[4..8].try_into().unwrap(),
         ]
         .concat();
-        println!("input_value: {}", input_value);
-        println!("nonce: {}", nonce);
+        println!("input_value: {input_value}");
+        println!("nonce: {nonce}");
         println!("message: {}", hex::encode(message.clone()));
         let msg_push_script_f1 = blake3_push_message_script_with_limb(&message, limb_len).compile();
         //println!("msg_push_script_f1: {}", msg_push_script_f1);
@@ -749,7 +748,7 @@ mod tests {
 
         let result = execute_script_buf(script);
 
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
         assert!(result.success, "Blake3 script execution failed");
 
         // Create an invalid hash by copying the expected hash and modifying one byte
@@ -779,7 +778,7 @@ mod tests {
 
         let result = execute_script_buf(script);
 
-        println!("Result: {:?}", result);
+        println!("Result: {result:?}");
         assert!(!result.success, "Blake3 script execution failed");
     }
 
@@ -848,7 +847,7 @@ mod tests {
         // 6) compare prefix => OP_EQUALVERIFY
         let prefix_script = build_prefix_equalverify(&flow_id_prefix);
 
-        println!("prefix_script: {}", prefix_script);
+        println!("prefix_script: {prefix_script}");
 
         // 7) push OP_TRUE
         let success_script = Builder::new().push_opcode(OP_TRUE).into_script();
@@ -921,7 +920,7 @@ mod tests {
             b = b.push_int(0x00_i64);
             b.into_script()
         };
-        println!("x_sig_script: {}", x_sig_script);
+        println!("x_sig_script: {x_sig_script}");
 
         // flow id prefix: 000d0000
         let flow_id_prefix = vec![0x00, 0x0d, 0x00, 0x00];
@@ -932,7 +931,7 @@ mod tests {
         let mut full_f1 = x_sig_script.to_bytes();
         full_f1.extend(locking_script.to_bytes());
         let exec_f1_script = ScriptBuf::from_bytes(full_f1);
-        println!("exec_f1_script: {}", exec_f1_script);
+        println!("exec_f1_script: {exec_f1_script}");
 
         let f1_res = execute_script_buf(exec_f1_script);
         println!("F1 => success={}", f1_res.success);
@@ -1038,7 +1037,7 @@ mod tests {
         // 6) compare prefix => OP_EQUALVERIFY
         let prefix_script = build_prefix_equalverify(&flow_id_prefix);
 
-        println!("prefix_script: {}", prefix_script);
+        println!("prefix_script: {prefix_script}");
 
         // 7) push OP_TRUE
         let success_script = Builder::new().push_opcode(OP_TRUE).into_script();
@@ -1138,9 +1137,7 @@ mod debug_reconstruct {
     }
 
     fn witness_script() -> ScriptBuf {
-        blake3_push_message_script_with_limb(&message(), LIMB)
-            .compile()
-            .into()
+        blake3_push_message_script_with_limb(&message(), LIMB).compile()
     }
 
     // ------------------------------------------------------------ //
@@ -1227,7 +1224,7 @@ mod debug_reconstruct {
 
         let info = execute_script_buf(full_script);
         println!("\n===== dbg_reconstruct_x_and_verify =====");
-        println!("{:#?}", info);
+        println!("{info:#?}");
 
         assert!(
             info.success,
